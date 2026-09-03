@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "headscale_domain_proxies",
+  "project_id": "931f5271-4990-40f8-9832-88f4949556c5"
+}
