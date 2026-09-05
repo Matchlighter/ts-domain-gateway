@@ -1,0 +1,12 @@
+- 2 `tsnet`(?) services - DNS and Egress
+    - (Egress may be easier with kernel routing and a true DNAT rule)
+- Configured w/ AppCaps on grants to both services
+- Each egress has a dedicated, private (and advertised) subnet for synthetic IPs
+- Domains assigned to Egress
+- DNS server checks policy, returns synth IP
+- Egress reverse queries DNS for the synth IP, queries real IP
+- Egress checks policy, performs DNAT
+- Use NodeAttrs to provide any extra DNS-only or Egress only config
+
+--
+- Support postgres

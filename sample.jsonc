@@ -1,0 +1,87 @@
+{
+    "grants": [
+        {
+            "src": [
+                "group:whatever"
+            ],
+            "dst": [
+                "tag:gateway1",
+                "tag:dns"
+            ],
+            "app": {
+                "matchlighter.net/cap/domain-gateway": [
+                    {
+                        "gateway": "tag:gateway1",
+                        // Any and all requests to matched _domains_ (regardless of port) will be routed through the specified gateway
+                        // The port value defines policy
+                        // Think of it a equivalent to { src: ["group:whatever"], dst: [lookup(<domain>)], ip: [...] }
+                        "resources": [
+                            {
+                                "domain": "example.com"
+                            },
+                            {
+                                "domain": "example.org",
+                                "ports": [
+                                    "tcp:443"
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "src": [
+                "group:whatever"
+            ],
+            "dst": [
+                "tag:dns"
+            ],
+            "ip": [
+                "udp:53"
+            ]
+        },
+        {
+            "src": [
+                "group:whatever"
+            ],
+            "dst": [
+                "net-gateway1"
+            ],
+            "ip": [
+                "tcp:443"
+            ],
+            "via": "tag:gateway1"
+        }
+    ],
+    "nodeAttrs": [
+        {
+            "target": [
+                "tag:dns"
+            ],
+            "attr": [{
+                "matchlighter.net/cap/domain-gateway-config": {
+                    "upstreamDNS": "system",
+                    "gateways": [{
+                        "tag": "tag:gateway1",
+                        "prefix": "10.254.0.0/18",
+                    }],
+                }
+            }]
+        },
+        {
+            "target": [
+                "tag:gateway1"
+            ],
+            "attr": [{
+                "matchlighter.net/cap/domain-gateway-config": {
+                    "upstreamDNS": "10.0.0.53:53",
+                    "gateways": [{
+                        "tag": "tag:gateway1",
+                        "prefix": "10.254.0.0/18",
+                    }],
+                }
+            }]
+        }
+    ]
+}
