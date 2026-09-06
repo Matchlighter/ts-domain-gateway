@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 type fakeIdentity map[netip.Addr]map[string]json.RawMessage
@@ -113,18 +114,19 @@ func TestSQLiteAllocationStoreSharesDNSReplicaAllocations(t *testing.T) {
 	defer second.Close()
 	prefix := netip.MustParsePrefix("10.254.0.0/29")
 	firstCache, secondCache := NewAllocator(), NewAllocator()
-	firstIP, err := first.Allocate(context.Background(), firstCache, "tag:home", prefix, "app.example.com")
+	now := time.Now()
+	firstIP, err := first.Allocate(context.Background(), firstCache, "tag:home", prefix, "app.example.com", now, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondIP, err := second.Allocate(context.Background(), secondCache, "tag:home", prefix, "app.example.com")
+	secondIP, err := second.Allocate(context.Background(), secondCache, "tag:home", prefix, "app.example.com", now, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if firstIP != secondIP {
 		t.Fatalf("replicas allocated %s and %s for one domain", firstIP, secondIP)
 	}
-	otherIP, err := second.Allocate(context.Background(), NewAllocator(), "tag:home", prefix, "other.example.com")
+	otherIP, err := second.Allocate(context.Background(), NewAllocator(), "tag:home", prefix, "other.example.com", now, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,9 +134,42 @@ func TestSQLiteAllocationStoreSharesDNSReplicaAllocations(t *testing.T) {
 		t.Fatalf("replicas reused %s for distinct domains", firstIP)
 	}
 	thirdCache := NewAllocator()
-	mapping, found, err := second.Lookup(context.Background(), thirdCache, firstIP)
+	mapping, found, err := second.Lookup(context.Background(), thirdCache, firstIP, now, time.Hour)
 	if err != nil || !found || mapping.Domain != "app.example.com" {
 		t.Fatalf("replica PTR lookup = %#v, %v, %v", mapping, found, err)
+	}
+}
+
+func TestSQLiteAllocationStoreExpiresAndRenewsLeases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allocations.db")
+	store, err := OpenAllocationStore(context.Background(), "sqlite://"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	lease := time.Hour
+	first := NewAllocator()
+	ip, err := store.Allocate(context.Background(), first, "tag:home", netip.MustParsePrefix("10.254.0.0/29"), "app.example.com", clock, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A second replica has no RAM entry, so this proves the database is queried
+	// and a qualifying PTR query renews the lease.
+	second := NewAllocator()
+	if mapping, found, err := store.Lookup(context.Background(), second, ip, clock.Add(59*time.Minute), lease); err != nil || !found || mapping.Domain != "app.example.com" {
+		t.Fatalf("renewed lookup = %#v, %v, %v", mapping, found, err)
+	}
+	third := NewAllocator()
+	if _, found, err := store.Lookup(context.Background(), third, ip, clock.Add(119*time.Minute), lease); err != nil || found {
+		t.Fatalf("expired lookup found = %v, err = %v", found, err)
+	}
+	reused, err := store.Allocate(context.Background(), NewAllocator(), "tag:home", netip.MustParsePrefix("10.254.0.0/29"), "other.example.com", clock.Add(119*time.Minute), lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused != ip {
+		t.Fatalf("expired address was not reused: got %s, want %s", reused, ip)
 	}
 }
 

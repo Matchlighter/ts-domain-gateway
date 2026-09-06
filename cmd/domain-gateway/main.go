@@ -27,6 +27,7 @@ type config struct {
 	GatewayListen    string   `json:"gateway_listen"`
 	TailscaledSocket string   `json:"tailscaled_socket"`
 	Database         string   `json:"database"`
+	AllocationLease  string   `json:"allocation_lease"`
 	TSNetDir         string   `json:"tsnet_dir"`
 	TSNetHostname    string   `json:"tsnet_hostname"`
 	TSNetAuthKey     string   `json:"tsnet_auth_key"`
@@ -80,7 +81,7 @@ func answer(req []byte, end int, ip netip.Addr) []byte {
 		out[p+1] = 0x0c
 		binary.BigEndian.PutUint16(out[p+2:p+4], 1)
 		binary.BigEndian.PutUint16(out[p+4:p+6], 1)
-		binary.BigEndian.PutUint32(out[p+6:p+10], 60)
+		binary.BigEndian.PutUint32(out[p+6:p+10], 600)
 		binary.BigEndian.PutUint16(out[p+10:p+12], 4)
 		copy(out[p+12:p+16], ip.AsSlice())
 	} else {
@@ -129,7 +130,7 @@ func ptrAnswer(req []byte, end int, name string) []byte {
 	out[p+1] = 0x0c
 	binary.BigEndian.PutUint16(out[p+2:p+4], 12)
 	binary.BigEndian.PutUint16(out[p+4:p+6], 1)
-	binary.BigEndian.PutUint32(out[p+6:p+10], 60)
+	binary.BigEndian.PutUint32(out[p+6:p+10], 600)
 	binary.BigEndian.PutUint16(out[p+10:p+12], uint16(len(rdata)))
 	copy(out[p+12:], rdata)
 	return out
@@ -170,6 +171,7 @@ func parseCommand(args []string) (command, error) {
 	fs.StringVar(&c.GatewayListen, "gateway-listen", c.GatewayListen, "egress TCP listen address")
 	fs.StringVar(&c.TailscaledSocket, "tailscaled-socket", c.TailscaledSocket, "tailscaled LocalAPI socket")
 	fs.StringVar(&c.Database, "database", c.Database, "allocation database URL (sqlite:// or postgres://)")
+	fs.StringVar(&c.AllocationLease, "allocation-lease", c.AllocationLease, "synthetic allocation lease duration")
 	fs.StringVar(&c.TSNetDir, "tsnet-dir", c.TSNetDir, "tsnet state directory")
 	fs.StringVar(&c.TSNetHostname, "tsnet-hostname", c.TSNetHostname, "tsnet hostname")
 	fs.StringVar(&c.TSNetAuthKey, "tsnet-auth-key", c.TSNetAuthKey, "tsnet auth key")
@@ -179,6 +181,10 @@ func parseCommand(args []string) (command, error) {
 	}
 	if *mode != "tsnet" && *mode != "tailscaled" {
 		return command{}, fmt.Errorf("invalid -mode %q (want tsnet or tailscaled)", *mode)
+	}
+	if c.AllocationLease != "" {
+		lease, err := time.ParseDuration(c.AllocationLease)
+		if err != nil || lease <= 0 { return command{}, fmt.Errorf("invalid allocation lease %q", c.AllocationLease) }
 	}
 	if *tags == "" {
 		c.TSNetTags = nil
@@ -370,12 +376,11 @@ func runDNS(ctx context.Context, c config, transport string) {
 		log.Fatal(err)
 	}
 	defer closeStore()
-	if store != nil {
-		if err := store.Load(ctx, alloc); err != nil {
-			log.Fatal(err)
-		}
-	}
-	s := &domain.Service{Identity: identity, Gateways: gs, Allocations: alloc, AllocationStore: store}
+	// SQL rows are intentionally loaded lazily: the store checks their lease on
+	// every cache miss, so startup cannot resurrect an expired mapping.
+	lease := time.Hour
+	if c.AllocationLease != "" { lease, _ = time.ParseDuration(c.AllocationLease) }
+	s := &domain.Service{Identity: identity, Gateways: gs, Allocations: alloc, AllocationStore: store, Lease: lease}
 	nodes := make([]domain.TaggedNode, 0, len(c.TaggedNodes))
 	for _, n := range c.TaggedNodes {
 		tags := map[string]struct{}{}

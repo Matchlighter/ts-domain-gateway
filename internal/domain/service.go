@@ -136,7 +136,12 @@ type Service struct {
 	Passthrough atomic.Uint64
 	Allowed     atomic.Uint64
 	Denied      atomic.Uint64
+	Lease       time.Duration
+	Now         func() time.Time
 }
+
+func (s *Service) lease() time.Duration { if s.Lease > 0 { return s.Lease }; return time.Hour }
+func (s *Service) now() time.Time { if s.Now != nil { return s.Now() }; return time.Now() }
 
 func (s *Service) DNS(ctx context.Context, source netip.Addr, name string) (netip.Addr, bool) {
 	if checker, ok := s.Identity.(GatewaySource); ok {
@@ -174,7 +179,7 @@ func (s *Service) DNS(ctx context.Context, source netip.Addr, name string) (neti
 	}
 	var ip netip.Addr
 	if s.AllocationStore != nil {
-		ip, err = s.AllocationStore.Allocate(ctx, s.Allocations, gateway, s.Gateways[gateway].Prefix, name)
+		ip, err = s.AllocationStore.Allocate(ctx, s.Allocations, gateway, s.Gateways[gateway].Prefix, name, s.now(), s.lease())
 	} else {
 		ip, err = s.Allocations.Allocate(gateway, s.Gateways[gateway].Prefix, name)
 	}
@@ -194,17 +199,14 @@ func (s *Service) DNS(ctx context.Context, source netip.Addr, name string) (neti
 // PTRMapping resolves a synthetic address locally first, then through the
 // shared allocation authority so any DNS replica can answer a peer's PTR.
 func (s *Service) PTRMapping(ctx context.Context, ip netip.Addr) (Mapping, bool) {
-	if mapping, ok := s.Allocations.Lookup(ip); ok {
-		return mapping, true
-	}
 	if s.AllocationStore == nil {
-		return Mapping{}, false
+		return s.Allocations.Lookup(ip)
 	}
-	mapping, ok, err := s.AllocationStore.Lookup(ctx, s.Allocations, ip)
+	mapping, ok, err := s.AllocationStore.Lookup(ctx, s.Allocations, ip, s.now(), s.lease())
 	return mapping, err == nil && ok
 }
 func (s *Service) Flow(ctx context.Context, source, destination netip.Addr, proto string, port uint16) (Mapping, Gateway, bool) {
-	m, ok := s.Allocations.Lookup(destination)
+	m, ok := s.PTRMapping(ctx, destination)
 	if !ok {
 		s.Denied.Add(1)
 		return Mapping{}, Gateway{}, false

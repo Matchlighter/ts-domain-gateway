@@ -23,6 +23,12 @@ domain-gateway egress -mode tsnet|tailscaled [flags]
 domain mappings and answers PTR records. `egress` is stateless: it queries
 those PTR records and never reads the allocation database.
 
+Synthetic allocations have a 60-minute lease by default. Successful synthetic
+forward and PTR lookups renew it; database renewals are debounced to one write
+per mapping every five minutes. Set `allocation_lease` in `config.json` (or
+`-allocation-lease`) to a positive Go duration such as `90m`. Synthetic A and
+PTR answers use a 10-minute DNS TTL.
+
 `-mode tsnet` runs an embedded userspace Tailscale node. It requires
 `tsnet_dir` and ordinarily a tagged pre-auth key on first enrollment.
 `-mode tailscaled` uses only the configured local tailscaled LocalAPI and host

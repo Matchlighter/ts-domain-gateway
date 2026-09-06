@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 )
 
 const Capability = "matchlighter.net/cap/domain-gateway"
@@ -159,11 +160,12 @@ type Allocator struct {
 	byKey     map[string]netip.Addr
 	byIP      map[netip.Addr]Mapping
 	next      map[string]netip.Addr
+	expires   map[netip.Addr]time.Time
 }
 type Mapping struct{ Gateway, Domain string }
 
 func NewAllocator() *Allocator {
-	return &Allocator{byKey: map[string]netip.Addr{}, byIP: map[netip.Addr]Mapping{}, next: map[string]netip.Addr{}}
+	return &Allocator{byKey: map[string]netip.Addr{}, byIP: map[netip.Addr]Mapping{}, next: map[string]netip.Addr{}, expires: map[netip.Addr]time.Time{}}
 }
 func (a *Allocator) Allocate(gateway string, prefix netip.Prefix, name string) (netip.Addr, error) {
 	key := gateway + "\x00" + name
@@ -197,6 +199,21 @@ func (a *Allocator) Lookup(ip netip.Addr) (Mapping, bool) {
 	return m, ok
 }
 
+func (a *Allocator) LookupLive(ip netip.Addr, now time.Time) (Mapping, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	m, ok := a.byIP[ip]
+	if !ok || (!a.expires[ip].IsZero() && !now.Before(a.expires[ip])) {
+		if ok {
+			delete(a.byIP, ip)
+			delete(a.byKey, m.Gateway+"\x00"+m.Domain)
+			delete(a.expires, ip)
+		}
+		return Mapping{}, false
+	}
+	return m, true
+}
+
 func (a *Allocator) LookupKey(gateway, domain string) (netip.Addr, bool) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -204,9 +221,20 @@ func (a *Allocator) LookupKey(gateway, domain string) (netip.Addr, bool) {
 	return ip, ok
 }
 
+func (a *Allocator) LookupKeyLive(gateway, domain string, now time.Time) (netip.Addr, bool) {
+	ip, ok := a.LookupKey(gateway, domain)
+	if !ok { return netip.Addr{}, false }
+	_, ok = a.LookupLive(ip, now)
+	return ip, ok
+}
+
 // Remember updates a local cache with an allocation established by the shared
 // registry. It never changes an existing mapping.
 func (a *Allocator) Remember(gateway, domain string, ip netip.Addr) {
+	a.RememberUntil(gateway, domain, ip, time.Time{})
+}
+
+func (a *Allocator) RememberUntil(gateway, domain string, ip netip.Addr, expiry time.Time) {
 	key := gateway + "\x00" + domain
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -218,6 +246,7 @@ func (a *Allocator) Remember(gateway, domain string, ip netip.Addr) {
 	}
 	a.byKey[key] = ip
 	a.byIP[ip] = Mapping{gateway, domain}
+	a.expires[ip] = expiry
 	if next := ip.Next(); !a.next[gateway].IsValid() || a.next[gateway].Less(next) {
 		a.next[gateway] = next
 	}

@@ -35,3 +35,13 @@ func TestParseCommandRejectsLegacyRoleAndInvalidTransport(t *testing.T) {
 		t.Fatal("invalid transport was accepted")
 	}
 }
+
+func TestParseCommandRejectsInvalidAllocationLease(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"allocation_lease":"zero"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseCommand([]string{"dns", "-config", path}); err == nil {
+		t.Fatal("invalid allocation lease was accepted")
+	}
+}
