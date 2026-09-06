@@ -18,7 +18,7 @@ type Port struct {
 }
 type Resource struct {
 	Domain string   `json:"domain"`
-	Ports  []string `json:"ports"`
+	IP     []string `json:"ip"`
 }
 
 // UnmarshalJSON accepts either the standard resource object or the concise
@@ -40,12 +40,24 @@ func (r *Resource) UnmarshalJSON(data []byte) error {
 			}
 			parts[i] = "tcp:" + port
 		}
-		r.Domain, r.Ports = domain, parts
+		r.Domain, r.IP = domain, parts
 		return nil
 	}
-	type resource Resource
-	return json.Unmarshal(data, (*resource)(r))
+	var resource struct {
+		Domain string          `json:"domain"`
+		IP     []string        `json:"ip"`
+		Ports  json.RawMessage `json:"ports"`
+	}
+	if err := json.Unmarshal(data, &resource); err != nil {
+		return err
+	}
+	if resource.Ports != nil {
+		return errors.New("resource ports field is unsupported; use ip")
+	}
+	r.Domain, r.IP = resource.Domain, resource.IP
+	return nil
 }
+
 type Grant struct {
 	Gateway   string     `json:"gateway"`
 	Resources []Resource `json:"resources"`
@@ -156,7 +168,7 @@ func Parse(capmap map[string]json.RawMessage, gateways map[string]Gateway) []Gra
 				valid = valid && validName(d)
 			}
 			g.Resources[i].Domain = d
-			valid = valid && validPorts(g.Resources[i].Ports)
+			valid = valid && validPorts(g.Resources[i].IP)
 		}
 		if valid {
 			grants = append(grants, g)
@@ -170,7 +182,7 @@ func Authorize(grants []Grant, gateway, name, proto string, port uint16) bool {
 			continue
 		}
 		for _, r := range g.Resources {
-			if match(r.Domain, name) && allowedPort(r.Ports, proto, port) {
+			if match(r.Domain, name) && allowedPort(r.IP, proto, port) {
 				return true
 			}
 		}

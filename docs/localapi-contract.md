@@ -20,7 +20,7 @@ The service preserves the outer payload until the application schema parser
 validates it. A payload must be exactly:
 
 ```json
-{"gateway":"tag:home","resources":[{"domain":"example.com","ports":["tcp:443"]}]}
+{"gateway":"tag:home","resources":[{"domain":"example.com","ip":["tcp:443"]}]}
 ```
 
 `CapMap` entries from all applicable grants are an additive union. A missing,

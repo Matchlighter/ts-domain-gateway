@@ -42,6 +42,42 @@ func TestSampleUsesValuedNodeAttrAppPayload(t *testing.T) {
 	}
 }
 
+func TestSampleDomainGrantUsesIPPortPolicy(t *testing.T) {
+	path := filepath.Join("..", "..", "sample.jsonc")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	standard, err := hujson.Standardize(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy struct {
+		Grants []struct {
+			App map[string]json.RawMessage `json:"app"`
+		}
+	}
+	if err := json.Unmarshal(standard, &policy); err != nil {
+		t.Fatal(err)
+	}
+	gateways := map[string]domain.Gateway{"tag:gateway1": {}}
+	for _, grant := range policy.Grants {
+		raw, ok := grant.App[domain.Capability]
+		if !ok {
+			continue
+		}
+		parsed := domain.Parse(map[string]json.RawMessage{domain.Capability: raw}, gateways)
+		if !domain.Authorize(parsed, "tag:gateway1", "example.org", "udp", 5000) {
+			t.Fatal("sample ip entry did not authorize its UDP port")
+		}
+		if domain.Authorize(parsed, "tag:gateway1", "example.org", "tcp", 5000) {
+			t.Fatal("sample ip entry authorized an unlisted protocol")
+		}
+		return
+	}
+	t.Fatal("sample has no domain gateway grant")
+}
+
 func TestAuthKeyDoesNotAdvertiseTags(t *testing.T) {
 	server, err := newTSNet(config{TSNetDir: t.TempDir(), TSNetAuthKey: "tskey-auth-test", TSNetTags: []string{"tag:dns"}})
 	if err != nil {

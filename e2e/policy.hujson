@@ -12,7 +12,7 @@
       "app": {
         "matchlighter.net/cap/domain-gateway": [{
           "gateway": "tag:gateway1",
-          "resources": [{"domain": "example.com", "ports": ["tcp:443"]}]
+          "resources": [{"domain": "example.com", "ip": ["tcp:443"]}]
         }]
       }
     },
