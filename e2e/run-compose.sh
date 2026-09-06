@@ -4,6 +4,7 @@ set -eu
 cd "$(dirname "$0")"
 log_file=full_logs.log
 monitor_pids=""
+progress() { printf '\033[1;36mE2E\033[0m: %s\n' "$1"; }
 stop_monitors() {
     for pid in $monitor_pids; do
         kill "$pid" 2>/dev/null || true
@@ -17,11 +18,11 @@ trap cleanup EXIT INT TERM
 # Build serially: Docker BuildKit can otherwise race while exporting the two
 # identical domain-gateway build graphs under separate Compose service tags.
 : >"$log_file"
-echo "E2E: building Docker images (details: $log_file)..."
+progress "building Docker images (details: $log_file)..."
 COMPOSE_PARALLEL_LIMIT=1 docker compose -f compose.yaml build >>"$log_file" 2>&1
-echo "E2E: Docker images built; starting services..."
+progress "Docker images built; starting services..."
 docker compose -f compose.yaml up --detach --no-build >>"$log_file" 2>&1
-echo "E2E: services started; waiting for test results..."
+progress "services started; waiting for test results..."
 
 docker compose -f compose.yaml logs --follow --timestamps >>"$log_file" 2>&1 &
 monitor_pids="$!"
