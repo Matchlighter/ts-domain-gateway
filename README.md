@@ -138,6 +138,15 @@ the first non-Tailscale resolver in `/etc/resolv.conf`; `100.100.100.100` is
 ignored to avoid a DNS loop. The policy compiler/control plane must preserve
 the object-valued `app` payload in NodeCapMap.
 
+An individual `matchlighter.net/cap/domain-gateway` grant may set
+`upstreamDNS` to a concrete `host:port` resolver endpoint. Its resources may
+set `upstreamDNS` too; a resource value wins over the grant value, and either
+wins over the gateway's configured resolver. These values are validated while
+the capability is parsed and are used only for the matching authorized flow.
+`system`, a bare hostname, port zero, and malformed endpoints are rejected
+with the whole capability entry, so policy data cannot turn into an arbitrary
+outbound connection.
+
 Tailnet transport grants must independently let clients reach both the DNS
 node on UDP 53 and the synthetic prefix through the appropriate gateway tag.
 Configure clients to send protected resource suffixes to the DNS node.

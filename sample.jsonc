@@ -15,6 +15,9 @@
                 "matchlighter.net/cap/domain-gateway": [
                     {
                         "gateway": "tag:gateway1",
+                        // Optional resolver for every resource in this grant. It must be
+                        // a concrete host:port endpoint, never "system".
+                        "upstreamDNS": "192.0.2.53:53",
                         // Any and all requests to matched _domains_ (regardless of port) will be routed through the specified gateway
                         // The port value defines policy
                         // Think of it a equivalent to { src: ["group:whatever"], dst: [lookup(<domain>)], ip: [...] }
@@ -26,6 +29,8 @@
                             },
                             {
                                 "domain": "example.org",
+                                // A resource resolver wins over the grant resolver above.
+                                "upstreamDNS": "192.0.2.54:53",
                                 // Omit ip for all ports; otherwise use tcp:N or udp:N.
                                 "ip": [
                                     "tcp:443",

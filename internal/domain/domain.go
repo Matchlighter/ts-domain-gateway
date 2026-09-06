@@ -4,7 +4,9 @@ package domain
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,8 +19,9 @@ type Port struct {
 	Number   uint16
 }
 type Resource struct {
-	Domain string   `json:"domain"`
-	IP     []string `json:"ip"`
+	Domain      string   `json:"domain"`
+	IP          []string `json:"ip"`
+	UpstreamDNS string   `json:"upstreamDNS"`
 }
 
 // UnmarshalJSON accepts either the standard resource object or the concise
@@ -44,9 +47,10 @@ func (r *Resource) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	var resource struct {
-		Domain string          `json:"domain"`
-		IP     []string        `json:"ip"`
-		Ports  json.RawMessage `json:"ports"`
+		Domain      string          `json:"domain"`
+		IP          []string        `json:"ip"`
+		UpstreamDNS string          `json:"upstreamDNS"`
+		Ports       json.RawMessage `json:"ports"`
 	}
 	if err := json.Unmarshal(data, &resource); err != nil {
 		return err
@@ -54,13 +58,14 @@ func (r *Resource) UnmarshalJSON(data []byte) error {
 	if resource.Ports != nil {
 		return errors.New("resource ports field is unsupported; use ip")
 	}
-	r.Domain, r.IP = resource.Domain, resource.IP
+	r.Domain, r.IP, r.UpstreamDNS = resource.Domain, resource.IP, resource.UpstreamDNS
 	return nil
 }
 
 type Grant struct {
-	Gateway   string     `json:"gateway"`
-	Resources []Resource `json:"resources"`
+	Gateway     string     `json:"gateway"`
+	UpstreamDNS string     `json:"upstreamDNS"`
+	Resources   []Resource `json:"resources"`
 }
 type Gateway struct {
 	Prefixes []netip.Prefix
@@ -146,6 +151,18 @@ func validPorts(ports []string) bool {
 	return true
 }
 
+// validPolicyResolver accepts only a concrete UDP resolver endpoint. "system"
+// is a NodeAttr convenience, not a capability value: policy must never turn
+// an unvalidated string into an outbound connection.
+func validPolicyResolver(resolver string) bool {
+	host, port, err := net.SplitHostPort(resolver)
+	if err != nil || host == "" {
+		return false
+	}
+	n, err := strconv.ParseUint(port, 10, 16)
+	return err == nil && n != 0
+}
+
 // Parse validates each independent opaque capability; invalid entries cannot authorize.
 func Parse(capmap map[string]json.RawMessage, gateways map[string]Gateway) []Grant {
 	raw, ok := capmap[Capability]
@@ -167,7 +184,7 @@ func Parse(capmap map[string]json.RawMessage, gateways map[string]Gateway) []Gra
 				continue
 			}
 		}
-		valid := true
+		valid := g.UpstreamDNS == "" || validPolicyResolver(g.UpstreamDNS)
 		for i := range g.Resources {
 			d := strings.ToLower(strings.TrimSuffix(g.Resources[i].Domain, "."))
 			if strings.HasPrefix(d, "**.") {
@@ -178,7 +195,8 @@ func Parse(capmap map[string]json.RawMessage, gateways map[string]Gateway) []Gra
 				valid = valid && validName(d)
 			}
 			g.Resources[i].Domain = d
-			valid = valid && validPorts(g.Resources[i].IP)
+			valid = valid && validPorts(g.Resources[i].IP) &&
+				(g.Resources[i].UpstreamDNS == "" || validPolicyResolver(g.Resources[i].UpstreamDNS))
 		}
 		if valid {
 			grants = append(grants, g)
@@ -186,6 +204,49 @@ func Parse(capmap map[string]json.RawMessage, gateways map[string]Gateway) []Gra
 	}
 	return grants
 }
+
+// GatewayFor returns the policy-selected gateway for an authorized flow. A
+// resource override wins over a grant override, which wins over the gateway's
+// NodeAttr resolver. Conflicting equally-specific policy choices fail closed.
+func GatewayFor(grants []Grant, gateways map[string]Gateway, tag, name, proto string, port uint16) (Gateway, bool) {
+	gateway, ok := gateways[tag]
+	if !ok {
+		return Gateway{}, false
+	}
+	resolver, priority := gateway.Resolver, 0
+	matched := false
+	for _, grant := range grants {
+		if grant.Gateway != tag {
+			continue
+		}
+		for _, resource := range grant.Resources {
+			if !match(resource.Domain, name) || !allowedPort(resource.IP, proto, port) {
+				continue
+			}
+			candidate, candidatePriority := grant.UpstreamDNS, 1
+			if resource.UpstreamDNS != "" {
+				candidate, candidatePriority = resource.UpstreamDNS, 2
+			}
+			if candidate == "" {
+				candidate, candidatePriority = gateway.Resolver, 0
+			}
+			if !matched || candidatePriority > priority {
+				resolver, priority, matched = candidate, candidatePriority, true
+				continue
+			}
+			if candidatePriority == priority && candidate != resolver {
+				return Gateway{}, false
+			}
+			matched = true
+		}
+	}
+	if !matched {
+		return Gateway{}, false
+	}
+	gateway.Resolver = resolver
+	return gateway, true
+}
+
 func Authorize(grants []Grant, gateway, name, proto string, port uint16) bool {
 	for _, g := range grants {
 		if g.Gateway != gateway {

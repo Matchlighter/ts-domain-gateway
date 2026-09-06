@@ -331,12 +331,17 @@ func (s *Service) Flow(ctx context.Context, source, destination netip.Addr, prot
 		return Mapping{}, Gateway{}, false
 	}
 	caps, err := s.Identity.Capabilities(ctx, source, destination)
-	if err != nil || !Authorize(Parse(caps, s.Gateways), m.Gateway, m.Domain, proto, port) {
+	if err != nil {
+		s.Denied.Add(1)
+		return Mapping{}, Gateway{}, false
+	}
+	gateway, ok := GatewayFor(Parse(caps, s.Gateways), s.Gateways, m.Gateway, m.Domain, proto, port)
+	if !ok {
 		s.Denied.Add(1)
 		return Mapping{}, Gateway{}, false
 	}
 	s.Allowed.Add(1)
-	return m, s.Gateways[m.Gateway], true
+	return m, gateway, true
 }
 
 // FlowDomain is for stateless gateway instances. DNS is the allocation authority:
@@ -362,12 +367,17 @@ func (s *Service) FlowDomain(ctx context.Context, source, destination netip.Addr
 		return Gateway{}, false
 	}
 	caps, err := s.Identity.Capabilities(ctx, source, destination)
-	if err != nil || !Authorize(Parse(caps, s.Gateways), tag, name, proto, port) {
+	if err != nil {
+		s.Denied.Add(1)
+		return Gateway{}, false
+	}
+	gateway, ok := GatewayFor(Parse(caps, s.Gateways), s.Gateways, tag, name, proto, port)
+	if !ok {
 		s.Denied.Add(1)
 		return Gateway{}, false
 	}
 	s.Allowed.Add(1)
-	return s.Gateways[tag], true
+	return gateway, true
 }
 
 func containsPrefix(prefixes []netip.Prefix, address netip.Addr) bool {

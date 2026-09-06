@@ -73,6 +73,10 @@ func TestSampleDomainGrantUsesIPPortPolicy(t *testing.T) {
 		if domain.Authorize(parsed, "tag:gateway1", "example.org", "tcp", 5000) {
 			t.Fatal("sample ip entry authorized an unlisted protocol")
 		}
+		gateway, ok := domain.GatewayFor(parsed, gateways, "tag:gateway1", "example.org", "udp", 5000)
+		if !ok || gateway.Resolver != "192.0.2.54:53" {
+			t.Fatalf("sample resource resolver = %#v, %v", gateway, ok)
+		}
 		return
 	}
 	t.Fatal("sample has no domain gateway grant")

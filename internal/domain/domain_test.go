@@ -127,6 +127,55 @@ func TestResourceWithoutIPAuthorizesAllPorts(t *testing.T) {
 	}
 }
 
+func TestGatewayForUsesResourceResolverBeforeGrantResolverAndFallback(t *testing.T) {
+	gateways := map[string]Gateway{"tag:home": {
+		Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")},
+		Resolver: "127.0.0.1:53",
+	}}
+	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
+		{
+			"gateway":"tag:home",
+			"upstreamDNS":"127.0.0.2:53",
+			"resources":[
+				{"domain":"resource.example.com","upstreamDNS":"127.0.0.3:53"},
+				{"domain":"grant.example.com"}
+			]
+		},
+		{"gateway":"tag:home","resources":[{"domain":"fallback.example.com"}]}
+	]`)}, gateways)
+
+	for _, test := range []struct {
+		name, want string
+	}{
+		{"resource.example.com", "127.0.0.3:53"},
+		{"grant.example.com", "127.0.0.2:53"},
+		{"fallback.example.com", "127.0.0.1:53"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gateway, ok := GatewayFor(grants, gateways, "tag:home", test.name, "tcp", 443)
+			if !ok || gateway.Resolver != test.want {
+				t.Fatalf("GatewayFor(%q) = %#v, %v; want resolver %q", test.name, gateway, ok, test.want)
+			}
+		})
+	}
+}
+
+func TestMalformedPolicyResolverFailsClosed(t *testing.T) {
+	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
+	for _, policy := range []string{
+		`{"gateway":"tag:home","upstreamDNS":"system","resources":[{"domain":"app.example.com"}]}`,
+		`{"gateway":"tag:home","upstreamDNS":"resolver.example.com","resources":[{"domain":"app.example.com"}]}`,
+		`{"gateway":"tag:home","resources":[{"domain":"app.example.com","upstreamDNS":"127.0.0.1:0"}]}`,
+	} {
+		t.Run(policy, func(t *testing.T) {
+			grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage("[" + policy + "]")}, gateways)
+			if len(grants) != 0 {
+				t.Fatalf("invalid resolver policy parsed as %#v", grants)
+			}
+		})
+	}
+}
+
 func TestResourceStringShorthandNormalizesForAuthorization(t *testing.T) {
 	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
 	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
@@ -325,6 +374,34 @@ func TestStatelessGatewayAuthorizesPTRDomain(t *testing.T) {
 	}
 	if _, ok := service.FlowDomain(context.Background(), source, netip.MustParseAddr("10.254.0.2"), "other.example.com", "tcp", 443); ok {
 		t.Fatal("PTR name bypassed domain policy")
+	}
+}
+
+func TestFlowDomainReturnsPolicySelectedResolver(t *testing.T) {
+	gateways := map[string]Gateway{"tag:home": {
+		Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")},
+		Resolver: "127.0.0.1:53",
+	}}
+	source := netip.MustParseAddr("100.64.0.2")
+	caps := map[string]json.RawMessage{Capability: json.RawMessage(`[
+		{"gateway":"tag:home","upstreamDNS":"127.0.0.2:53","resources":[
+			{"domain":"resource.example.com","upstreamDNS":"127.0.0.3:53"},
+			{"domain":"grant.example.com"}
+		]},
+		{"gateway":"tag:home","resources":[{"domain":"fallback.example.com"}]}
+	]`)}
+	service := &Service{Identity: fakeIdentity{source: caps}, Gateways: gateways}
+	for _, test := range []struct{ name, want string }{
+		{"resource.example.com", "127.0.0.3:53"},
+		{"grant.example.com", "127.0.0.2:53"},
+		{"fallback.example.com", "127.0.0.1:53"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gateway, ok := service.FlowDomain(context.Background(), source, netip.MustParseAddr("10.254.0.2"), test.name, "tcp", 443)
+			if !ok || gateway.Resolver != test.want {
+				t.Fatalf("FlowDomain(%q) = %#v, %v; want resolver %q", test.name, gateway, ok, test.want)
+			}
+		})
 	}
 }
 
