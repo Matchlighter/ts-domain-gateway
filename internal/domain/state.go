@@ -26,16 +26,16 @@ type diskMapping struct{ Gateway, Domain, IP string }
 type AllocationStore interface {
 	Load(context.Context, *Allocator) error
 	Save(context.Context, *Allocator) error
-	Allocate(context.Context, *Allocator, string, netip.Prefix, string, time.Time, time.Duration) (netip.Addr, error)
+	Allocate(context.Context, *Allocator, string, []netip.Prefix, string, time.Time, time.Duration) (netip.Addr, error)
 	Lookup(context.Context, *Allocator, netip.Addr, time.Time, time.Duration) (Mapping, bool, error)
 }
 
 // SQLStore persists allocations in either SQLite or PostgreSQL. It can be
 // shared by DNS restarts, but there must still be one active DNS authority.
 type SQLStore struct {
-	db       *sql.DB
-	postgres bool
-	mu       sync.Mutex
+	db          *sql.DB
+	postgres    bool
+	mu          sync.Mutex
 	lastRenewed map[string]time.Time
 }
 
@@ -192,18 +192,23 @@ func (s *SQLStore) renew(ctx context.Context, gateway, domain string, now time.T
 	s.mu.Lock()
 	key := gateway + "\x00" + domain
 	last := s.lastRenewed[key]
-	if !force && !last.IsZero() && now.Sub(last) < renewalDebounce { s.mu.Unlock(); return nil }
+	if !force && !last.IsZero() && now.Sub(last) < renewalDebounce {
+		s.mu.Unlock()
+		return nil
+	}
 	s.lastRenewed[key] = now
 	s.mu.Unlock()
 	statement := `UPDATE domain_gateway_allocations SET expires_at = ? WHERE gateway = ? AND domain = ?`
-	if s.postgres { statement = `UPDATE domain_gateway_allocations SET expires_at = $1 WHERE gateway = $2 AND domain = $3` }
+	if s.postgres {
+		statement = `UPDATE domain_gateway_allocations SET expires_at = $1 WHERE gateway = $2 AND domain = $3`
+	}
 	_, err := s.db.ExecContext(ctx, statement, now.Add(lease).UnixNano(), gateway, domain)
 	return err
 }
 
 // Allocate treats RAM as an expiry-bounded cache; the shared registry decides
 // whether an allocation exists and persists at most one renewal per five minutes.
-func (s *SQLStore) Allocate(ctx context.Context, a *Allocator, gateway string, prefix netip.Prefix, domain string, now time.Time, lease time.Duration) (netip.Addr, error) {
+func (s *SQLStore) Allocate(ctx context.Context, a *Allocator, gateway string, prefixes []netip.Prefix, domain string, now time.Time, lease time.Duration) (netip.Addr, error) {
 	if ip, ok := a.LookupKeyLive(gateway, domain, now); ok {
 		a.RememberUntil(gateway, domain, ip, now.Add(lease))
 		return ip, s.renew(ctx, gateway, domain, now, lease, false)
@@ -211,31 +216,61 @@ func (s *SQLStore) Allocate(ctx context.Context, a *Allocator, gateway string, p
 	var value string
 	var expiry int64
 	query := `SELECT ip, expires_at FROM domain_gateway_allocations WHERE gateway = ? AND domain = ? AND expires_at > ?`
-	if s.postgres { query = `SELECT host(ip), expires_at FROM domain_gateway_allocations WHERE gateway = $1 AND domain = $2 AND expires_at > $3` }
+	if s.postgres {
+		query = `SELECT host(ip), expires_at FROM domain_gateway_allocations WHERE gateway = $1 AND domain = $2 AND expires_at > $3`
+	}
 	err := s.db.QueryRowContext(ctx, query, gateway, domain, now.UnixNano()).Scan(&value, &expiry)
 	if err == nil {
-		ip, err := netip.ParseAddr(value); if err != nil { return netip.Addr{}, err }
+		ip, err := netip.ParseAddr(value)
+		if err != nil {
+			return netip.Addr{}, err
+		}
 		a.RememberUntil(gateway, domain, ip, now.Add(lease))
 		return ip, s.renew(ctx, gateway, domain, now, lease, true)
 	}
-	if !errors.Is(err, sql.ErrNoRows) { return netip.Addr{}, err }
-	deleteStatement := `DELETE FROM domain_gateway_allocations WHERE expires_at IS NULL OR expires_at <= ?`
-	if s.postgres { deleteStatement = `DELETE FROM domain_gateway_allocations WHERE expires_at IS NULL OR expires_at <= $1` }
-	if _, err := s.db.ExecContext(ctx, deleteStatement, now.UnixNano()); err != nil { return netip.Addr{}, err }
-	for ip := prefix.Masked().Addr().Next(); prefix.Contains(ip); ip = ip.Next() {
-		statement := `INSERT INTO domain_gateway_allocations (gateway, domain, ip, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`
-		if s.postgres { statement = `INSERT INTO domain_gateway_allocations (gateway, domain, ip, expires_at) VALUES ($1, $2, $3::inet, $4) ON CONFLICT DO NOTHING` }
-		result, err := s.db.ExecContext(ctx, statement, gateway, domain, ip.String(), now.Add(lease).UnixNano()); if err != nil { return netip.Addr{}, err }
-		inserted, err := result.RowsAffected(); if err != nil { return netip.Addr{}, err }
-		err = s.db.QueryRowContext(ctx, query, gateway, domain, now.UnixNano()).Scan(&value, &expiry)
-		if errors.Is(err, sql.ErrNoRows) && inserted == 0 { continue }
-		if err != nil { return netip.Addr{}, err }
-		allocated, err := netip.ParseAddr(value); if err != nil { return netip.Addr{}, err }
-		a.RememberUntil(gateway, domain, allocated, now.Add(lease))
-		s.mu.Lock(); s.lastRenewed[gateway+"\x00"+domain] = now; s.mu.Unlock()
-		return allocated, nil
+	if !errors.Is(err, sql.ErrNoRows) {
+		return netip.Addr{}, err
 	}
-	return netip.Addr{}, fmt.Errorf("synthetic prefix exhausted")
+	deleteStatement := `DELETE FROM domain_gateway_allocations WHERE expires_at IS NULL OR expires_at <= ?`
+	if s.postgres {
+		deleteStatement = `DELETE FROM domain_gateway_allocations WHERE expires_at IS NULL OR expires_at <= $1`
+	}
+	if _, err := s.db.ExecContext(ctx, deleteStatement, now.UnixNano()); err != nil {
+		return netip.Addr{}, err
+	}
+	for _, prefix := range prefixes {
+		for ip := prefix.Masked().Addr().Next(); prefix.Contains(ip); ip = ip.Next() {
+			statement := `INSERT INTO domain_gateway_allocations (gateway, domain, ip, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`
+			if s.postgres {
+				statement = `INSERT INTO domain_gateway_allocations (gateway, domain, ip, expires_at) VALUES ($1, $2, $3::inet, $4) ON CONFLICT DO NOTHING`
+			}
+			result, err := s.db.ExecContext(ctx, statement, gateway, domain, ip.String(), now.Add(lease).UnixNano())
+			if err != nil {
+				return netip.Addr{}, err
+			}
+			inserted, err := result.RowsAffected()
+			if err != nil {
+				return netip.Addr{}, err
+			}
+			err = s.db.QueryRowContext(ctx, query, gateway, domain, now.UnixNano()).Scan(&value, &expiry)
+			if errors.Is(err, sql.ErrNoRows) && inserted == 0 {
+				continue
+			}
+			if err != nil {
+				return netip.Addr{}, err
+			}
+			allocated, err := netip.ParseAddr(value)
+			if err != nil {
+				return netip.Addr{}, err
+			}
+			a.RememberUntil(gateway, domain, allocated, now.Add(lease))
+			s.mu.Lock()
+			s.lastRenewed[gateway+"\x00"+domain] = now
+			s.mu.Unlock()
+			return allocated, nil
+		}
+	}
+	return netip.Addr{}, fmt.Errorf("synthetic ranges exhausted")
 }
 
 func (s *SQLStore) Lookup(ctx context.Context, a *Allocator, ip netip.Addr, now time.Time, lease time.Duration) (Mapping, bool, error) {
@@ -245,10 +280,16 @@ func (s *SQLStore) Lookup(ctx context.Context, a *Allocator, ip netip.Addr, now 
 	}
 	var mapping Mapping
 	query := `SELECT gateway, domain FROM domain_gateway_allocations WHERE ip = ? AND expires_at > ?`
-	if s.postgres { query = `SELECT gateway, domain FROM domain_gateway_allocations WHERE ip = $1::inet AND expires_at > $2` }
+	if s.postgres {
+		query = `SELECT gateway, domain FROM domain_gateway_allocations WHERE ip = $1::inet AND expires_at > $2`
+	}
 	err := s.db.QueryRowContext(ctx, query, ip.String(), now.UnixNano()).Scan(&mapping.Gateway, &mapping.Domain)
-	if errors.Is(err, sql.ErrNoRows) { return Mapping{}, false, nil }
-	if err != nil { return Mapping{}, false, err }
+	if errors.Is(err, sql.ErrNoRows) {
+		return Mapping{}, false, nil
+	}
+	if err != nil {
+		return Mapping{}, false, err
+	}
 	a.RememberUntil(mapping.Gateway, mapping.Domain, ip, now.Add(lease))
 	return mapping, true, s.renew(ctx, mapping.Gateway, mapping.Domain, now, lease, true)
 }

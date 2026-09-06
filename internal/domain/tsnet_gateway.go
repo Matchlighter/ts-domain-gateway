@@ -19,9 +19,9 @@ func (s *Service) ServeTSNetGateway(ctx context.Context, server *tsnet.Server) e
 	if err != nil {
 		return err
 	}
-	routes := make([]netip.Prefix, 0, len(s.Gateways))
+	routes := make([]netip.Prefix, 0)
 	for _, gateway := range s.Gateways {
-		routes = append(routes, gateway.Prefix)
+		routes = append(routes, gateway.Prefixes...)
 	}
 	if _, err := client.EditPrefs(ctx, &ipn.MaskedPrefs{Prefs: ipn.Prefs{AdvertiseRoutes: routes}, AdvertiseRoutesSet: true}); err != nil {
 		return err
@@ -29,7 +29,7 @@ func (s *Service) ServeTSNetGateway(ctx context.Context, server *tsnet.Server) e
 	server.RegisterFallbackTCPHandler(func(src, dst netip.AddrPort) (func(net.Conn), bool) {
 		known := false
 		for _, gateway := range s.Gateways {
-			if gateway.Prefix.Contains(dst.Addr()) {
+			if containsPrefix(gateway.Prefixes, dst.Addr()) {
 				known = true
 				break
 			}

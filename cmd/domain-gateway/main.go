@@ -184,7 +184,9 @@ func parseCommand(args []string) (command, error) {
 	}
 	if c.AllocationLease != "" {
 		lease, err := time.ParseDuration(c.AllocationLease)
-		if err != nil || lease <= 0 { return command{}, fmt.Errorf("invalid allocation lease %q", c.AllocationLease) }
+		if err != nil || lease <= 0 {
+			return command{}, fmt.Errorf("invalid allocation lease %q", c.AllocationLease)
+		}
 	}
 	if *tags == "" {
 		c.TSNetTags = nil
@@ -225,12 +227,8 @@ func gateways(nodeConfig domain.NodeConfig) (map[string]domain.Gateway, string, 
 		}
 	}
 	gs := make(map[string]domain.Gateway, len(nodeConfig.Gateways))
-	for _, gateway := range nodeConfig.Gateways {
-		p, err := netip.ParsePrefix(gateway.Prefix)
-		if err != nil {
-			return nil, "", err
-		}
-		gs[gateway.Tag] = domain.Gateway{Prefix: p, Resolver: upstream}
+	for tag, prefixes := range nodeConfig.Gateways {
+		gs[tag] = domain.Gateway{Prefixes: prefixes, Resolver: upstream}
 	}
 	return gs, upstream, nil
 }
@@ -379,7 +377,9 @@ func runDNS(ctx context.Context, c config, transport string) {
 	// SQL rows are intentionally loaded lazily: the store checks their lease on
 	// every cache miss, so startup cannot resurrect an expired mapping.
 	lease := time.Hour
-	if c.AllocationLease != "" { lease, _ = time.ParseDuration(c.AllocationLease) }
+	if c.AllocationLease != "" {
+		lease, _ = time.ParseDuration(c.AllocationLease)
+	}
 	s := &domain.Service{Identity: identity, Gateways: gs, Allocations: alloc, AllocationStore: store, Lease: lease}
 	nodes := make([]domain.TaggedNode, 0, len(c.TaggedNodes))
 	for _, n := range c.TaggedNodes {

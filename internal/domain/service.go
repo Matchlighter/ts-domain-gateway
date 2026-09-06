@@ -140,8 +140,18 @@ type Service struct {
 	Now         func() time.Time
 }
 
-func (s *Service) lease() time.Duration { if s.Lease > 0 { return s.Lease }; return time.Hour }
-func (s *Service) now() time.Time { if s.Now != nil { return s.Now() }; return time.Now() }
+func (s *Service) lease() time.Duration {
+	if s.Lease > 0 {
+		return s.Lease
+	}
+	return time.Hour
+}
+func (s *Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
 
 func (s *Service) DNS(ctx context.Context, source netip.Addr, name string) (netip.Addr, bool) {
 	if checker, ok := s.Identity.(GatewaySource); ok {
@@ -179,9 +189,9 @@ func (s *Service) DNS(ctx context.Context, source netip.Addr, name string) (neti
 	}
 	var ip netip.Addr
 	if s.AllocationStore != nil {
-		ip, err = s.AllocationStore.Allocate(ctx, s.Allocations, gateway, s.Gateways[gateway].Prefix, name, s.now(), s.lease())
+		ip, err = s.AllocationStore.Allocate(ctx, s.Allocations, gateway, s.Gateways[gateway].Prefixes, name, s.now(), s.lease())
 	} else {
-		ip, err = s.Allocations.Allocate(gateway, s.Gateways[gateway].Prefix, name)
+		ip, err = s.Allocations.Allocate(gateway, s.Gateways[gateway].Prefixes, name)
 	}
 	if err != nil {
 		s.Passthrough.Add(1)
@@ -230,7 +240,7 @@ func (s *Service) FlowDomain(ctx context.Context, source, destination netip.Addr
 	}
 	var tag string
 	for candidate, gateway := range s.Gateways {
-		if gateway.Prefix.Contains(destination) {
+		if containsPrefix(gateway.Prefixes, destination) {
 			if tag != "" {
 				s.Denied.Add(1)
 				return Gateway{}, false
@@ -249,4 +259,13 @@ func (s *Service) FlowDomain(ctx context.Context, source, destination netip.Addr
 	}
 	s.Allowed.Add(1)
 	return s.Gateways[tag], true
+}
+
+func containsPrefix(prefixes []netip.Prefix, address netip.Addr) bool {
+	for _, prefix := range prefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
 }

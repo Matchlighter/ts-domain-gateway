@@ -63,7 +63,7 @@ type Grant struct {
 	Resources []Resource `json:"resources"`
 }
 type Gateway struct {
-	Prefix   netip.Prefix
+	Prefixes []netip.Prefix
 	Resolver string
 }
 
@@ -205,7 +205,7 @@ type Mapping struct{ Gateway, Domain string }
 func NewAllocator() *Allocator {
 	return &Allocator{byKey: map[string]netip.Addr{}, byIP: map[netip.Addr]Mapping{}, next: map[string]netip.Addr{}, expires: map[netip.Addr]time.Time{}}
 }
-func (a *Allocator) Allocate(gateway string, prefix netip.Prefix, name string) (netip.Addr, error) {
+func (a *Allocator) Allocate(gateway string, prefixes []netip.Prefix, name string) (netip.Addr, error) {
 	key := gateway + "\x00" + name
 	a.mu.RLock()
 	ip, ok := a.byKey[key]
@@ -219,11 +219,37 @@ func (a *Allocator) Allocate(gateway string, prefix netip.Prefix, name string) (
 		return ip, nil
 	}
 	ip = a.next[gateway]
-	if !ip.IsValid() {
-		ip = prefix.Addr().Next()
+	start := 0
+	if ip.IsValid() {
+		for i, prefix := range prefixes {
+			if prefix.Contains(ip) {
+				start = i
+				break
+			}
+			if previous := ip.Prev(); previous.IsValid() && prefix.Contains(previous) {
+				start = i + 1
+				break
+			}
+		}
 	}
-	if !prefix.Contains(ip) || ip == prefix.Masked().Addr() {
-		return netip.Addr{}, errors.New("synthetic prefix exhausted")
+	if len(prefixes) == 0 || start == len(prefixes) {
+		return netip.Addr{}, errors.New("synthetic ranges exhausted")
+	}
+	if !ip.IsValid() {
+		ip = prefixes[0].Masked().Addr().Next()
+	}
+	for i := start; i < len(prefixes); i++ {
+		prefix := prefixes[i]
+		if i != start || !prefix.Contains(ip) {
+			ip = prefix.Masked().Addr().Next()
+		}
+		if prefix.Contains(ip) && ip != prefix.Masked().Addr() {
+			break
+		}
+		ip = netip.Addr{}
+	}
+	if !ip.IsValid() {
+		return netip.Addr{}, errors.New("synthetic ranges exhausted")
 	}
 	a.byKey[key] = ip
 	a.byIP[ip] = Mapping{gateway, name}
@@ -261,7 +287,9 @@ func (a *Allocator) LookupKey(gateway, domain string) (netip.Addr, bool) {
 
 func (a *Allocator) LookupKeyLive(gateway, domain string, now time.Time) (netip.Addr, bool) {
 	ip, ok := a.LookupKey(gateway, domain)
-	if !ok { return netip.Addr{}, false }
+	if !ok {
+		return netip.Addr{}, false
+	}
 	_, ok = a.LookupLive(ip, now)
 	return ip, ok
 }

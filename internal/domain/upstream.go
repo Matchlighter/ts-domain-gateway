@@ -10,13 +10,9 @@ import (
 // NodeConfigCapability is a NodeAttr (not a peer-grant capability).
 const NodeConfigCapability = "matchlighter.net/cap/domain-gateway-config"
 
-type NodeGateway struct {
-	Tag    string `json:"tag"`
-	Prefix string `json:"prefix"`
-}
 type NodeConfig struct {
-	UpstreamDNS string        `json:"upstreamDNS"`
-	Gateways    []NodeGateway `json:"gateways"`
+	UpstreamDNS string `json:"upstreamDNS"`
+	Gateways    map[string][]netip.Prefix
 }
 
 // ConfigFromNodeAttrs accepts typed objects. Values merge additively, but
@@ -31,9 +27,14 @@ func ConfigFromNodeAttrs(caps map[string]json.RawMessage) (NodeConfig, bool) {
 		return NodeConfig{}, false
 	}
 	result := NodeConfig{}
-	seen := map[string]netip.Prefix{}
+	seen := []netip.Prefix{}
 	for _, raw := range values {
-		var config NodeConfig
+		var config struct {
+			UpstreamDNS string `json:"upstreamDNS"`
+			Gateways    map[string]struct {
+				Ranges []string `json:"range"`
+			} `json:"gateways"`
+		}
 		if json.Unmarshal(raw, &config) != nil || config.UpstreamDNS == "" || len(config.Gateways) == 0 {
 			return NodeConfig{}, false
 		}
@@ -48,22 +49,25 @@ func ConfigFromNodeAttrs(caps map[string]json.RawMessage) (NodeConfig, bool) {
 			return NodeConfig{}, false
 		}
 		result.UpstreamDNS = resolver
-		for _, gateway := range config.Gateways {
-			prefix, err := netip.ParsePrefix(gateway.Prefix)
-			if err != nil || !prefix.Addr().Is4() || gateway.Tag == "" {
+		if result.Gateways == nil {
+			result.Gateways = map[string][]netip.Prefix{}
+		}
+		for tag, gateway := range config.Gateways {
+			if tag == "" || len(gateway.Ranges) == 0 {
 				return NodeConfig{}, false
 			}
-			if prior, exists := seen[gateway.Tag]; exists && prior != prefix {
-				return NodeConfig{}, false
-			}
-			for tag, prior := range seen {
-				if tag != gateway.Tag && prefix.Overlaps(prior) {
+			for _, value := range gateway.Ranges {
+				prefix, err := netip.ParsePrefix(value)
+				if err != nil || !prefix.Addr().Is4() {
 					return NodeConfig{}, false
 				}
-			}
-			if _, exists := seen[gateway.Tag]; !exists {
-				seen[gateway.Tag] = prefix
-				result.Gateways = append(result.Gateways, gateway)
+				for _, prior := range seen {
+					if prefix.Overlaps(prior) {
+						return NodeConfig{}, false
+					}
+				}
+				seen = append(seen, prefix)
+				result.Gateways[tag] = append(result.Gateways[tag], prefix)
 			}
 		}
 	}

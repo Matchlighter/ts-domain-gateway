@@ -24,14 +24,14 @@
       "target": ["tag:dns"],
       "app": {"matchlighter.net/cap/domain-gateway-config": [{
         "upstreamDNS": "system",
-        "gateways": [{"tag": "tag:gateway1", "prefix": "10.254.0.0/18"}]
+        "gateways": {"tag:gateway1": {"range": ["10.254.0.0/18"]}}
       }]}
     },
     {
       "target": ["tag:gateway1"],
       "app": {"matchlighter.net/cap/domain-gateway-config": [{
         "upstreamDNS": "system",
-        "gateways": [{"tag": "tag:gateway1", "prefix": "10.254.0.0/18"}]
+        "gateways": {"tag:gateway1": {"range": ["10.254.0.0/18"]}}
       }]}
     }
   ]
