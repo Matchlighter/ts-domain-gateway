@@ -39,6 +39,46 @@ func TestCapabilitiesAndAllocation(t *testing.T) {
 	}
 }
 
+func TestAuthorizeDomainWildcardsAtTheirDefinedDepths(t *testing.T) {
+	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
+	for _, test := range []struct {
+		name    string
+		pattern string
+		domain  string
+		allowed bool
+	}{
+		{"single wildcard permits one label", "*.dev.example.com", "api.dev.example.com", true},
+		{"single wildcard rejects multiple labels", "*.dev.example.com", "api.eu.dev.example.com", false},
+		{"single wildcard rejects apex", "*.dev.example.com", "dev.example.com", false},
+		{"recursive wildcard permits one label", "**.dev.example.com", "api.dev.example.com", true},
+		{"recursive wildcard permits multiple labels", "**.dev.example.com", "api.eu.dev.example.com", true},
+		{"recursive wildcard rejects apex", "**.dev.example.com", "dev.example.com", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
+				{"gateway":"tag:home","resources":[{"domain":"` + test.pattern + `","ip":["tcp:443"]}]}
+			]`)}, gateways)
+			if got := Authorize(grants, "tag:home", test.domain, "tcp", 443); got != test.allowed {
+				t.Fatalf("Authorize(%q, %q) = %v, want %v", test.pattern, test.domain, got, test.allowed)
+			}
+		})
+	}
+}
+
+func TestParseRejectsMalformedDomainWildcards(t *testing.T) {
+	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
+	for _, pattern := range []string{"**", "**.", "***.example.com", "foo.**.example.com", "*.*.example.com"} {
+		t.Run(pattern, func(t *testing.T) {
+			grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
+				{"gateway":"tag:home","resources":[{"domain":"` + pattern + `","ip":["tcp:443"]}]}
+			]`)}, gateways)
+			if len(grants) != 0 {
+				t.Fatalf("malformed wildcard %q produced a grant", pattern)
+			}
+		})
+	}
+}
+
 func TestMalformedPortFailsClosed(t *testing.T) {
 	g := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
 	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[{"gateway":"tag:home","resources":[{"domain":"a.example.com","ip":["tcp:70000"]}]}]`)}, g)

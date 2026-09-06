@@ -30,6 +30,11 @@ effect on the next DNS request/connection. An outage fails closed for new
 synthesis and flows; this V1 deliberately has no authorization cache that can
 extend a revoked grant.
 
+Resource domains are exact by default. `*.example.com` matches exactly one
+label below the suffix, while `**.example.com` matches one or more labels at
+any depth below it. Neither wildcard matches the bare apex `example.com`;
+malformed wildcard patterns grant no access.
+
 The Go runtime does not cache authorization capabilities: every DNS decision
 and every new gateway flow obtains the source's current compiled CapMap from
 its local tailscaled. Allocation state is cached separately and authoritatively

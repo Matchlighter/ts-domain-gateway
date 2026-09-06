@@ -88,6 +88,12 @@ func NormalName(name string) (string, bool) {
 	return name, validName(name)
 }
 func match(pattern, name string) bool {
+	// **.suffix matches one or more labels below suffix; it never matches the
+	// bare suffix. *.suffix remains a single-label wildcard.
+	if strings.HasPrefix(pattern, "**.") {
+		suffix := pattern[3:]
+		return strings.HasSuffix(name, "."+suffix)
+	}
 	if strings.HasPrefix(pattern, "*.") {
 		suffix := pattern[2:]
 		return strings.HasSuffix(name, "."+suffix) && strings.Count(name, ".") == strings.Count(suffix, ".")+1
@@ -162,7 +168,9 @@ func Parse(capmap map[string]json.RawMessage, gateways map[string]Gateway) []Gra
 		valid := true
 		for i := range g.Resources {
 			d := strings.ToLower(strings.TrimSuffix(g.Resources[i].Domain, "."))
-			if strings.HasPrefix(d, "*.") {
+			if strings.HasPrefix(d, "**.") {
+				valid = valid && validName(d[3:])
+			} else if strings.HasPrefix(d, "*.") {
 				valid = valid && validName(d[2:])
 			} else {
 				valid = valid && validName(d)
