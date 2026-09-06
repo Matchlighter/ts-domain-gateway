@@ -29,11 +29,6 @@ monitor_pids="$!"
 client=$(docker compose -f compose.yaml ps -q client)
 docker logs --follow "$client" &
 monitor_pids="$monitor_pids $!"
-for service in headscale upstream dns gateway denied gateway-dns; do
-    container=$(docker compose -f compose.yaml ps -q "$service")
-    docker logs --follow "$container" 2>&1 >/dev/null | sed "s/^/$service | /" &
-    monitor_pids="$monitor_pids $!"
-done
 
 status=$(docker wait "$client")
 exit "$status"
