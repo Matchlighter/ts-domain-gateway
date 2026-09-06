@@ -11,6 +11,46 @@ ROLE = os.environ["ROLE"]
 NAME = "protected.example.test"
 ORDINARY = "ordinary.example.test"
 REAL = "172.30.0.10"
+RESULTS = []
+SUMMARY_REPORTED = False
+
+def summary():
+    global SUMMARY_REPORTED
+    if SUMMARY_REPORTED:
+        return
+    SUMMARY_REPORTED = True
+    passed = RESULTS.count("PASS")
+    failed = RESULTS.count("FAIL")
+    expected_failures = RESULTS.count("XFAIL")
+    print("E2E %s summary: %d passed, %d failed, %d expected failures" % (ROLE, passed, failed, expected_failures), flush=True)
+
+def check(name, command):
+    print("E2E %s: %s ... " % (ROLE, name), end="", flush=True)
+    try:
+        result = command()
+    except Exception as error:
+        RESULTS.append("FAIL")
+        print("FAIL (%s: %s)" % (type(error).__name__, error), flush=True)
+        raise
+    RESULTS.append("PASS")
+    print("PASS", flush=True)
+    return result
+
+def expected_red(name, command):
+    print("E2E %s: %s ... " % (ROLE, name), end="", flush=True)
+    try:
+        command()
+    except socket.timeout:
+        RESULTS.append("XFAIL")
+        print("XFAIL (UDP proxy is not implemented)", flush=True)
+        return
+    except Exception as error:
+        RESULTS.append("FAIL")
+        print("FAIL (%s: %s)" % (type(error).__name__, error), flush=True)
+        raise
+    RESULTS.append("FAIL")
+    print("FAIL (unexpectedly succeeded; update this probe)", flush=True)
+    raise AssertionError("UDP unexpectedly succeeded; update this probe")
 
 def run(*args): return subprocess.check_output(args, text=True).strip()
 def wait_for(command, timeout=90):
@@ -86,46 +126,63 @@ def http(ip, tls=False):
     assert b"200" in data and b"upstream-ok" in data, data
     return True
 
-def main():
+def connect():
     wait_for(lambda: os.path.exists("/auth/ready"))
     subprocess.Popen(["tailscaled", "--tun=userspace-networking", "--socks5-server=127.0.0.1:1055", "--state=/state/tailscaled.state", "--socket=/var/run/tailscale/tailscaled.sock"])
     wait_for(lambda: os.path.exists("/var/run/tailscale/tailscaled.sock"))
     run("tailscale", "up", "--login-server=http://headscale:8080", "--auth-key=" + open("/auth/" + ROLE).read().strip(), "--accept-routes", "--accept-dns=false")
-    dns = wait_for(lambda: peer_ip("e2e-dns"))
+    return wait_for(lambda: peer_ip("e2e-dns"))
+
+def synthetic_address(dns):
+    synthetic = wait_for(lambda: query(dns, NAME))
+    assert synthetic.startswith("10.254."), synthetic
+    return synthetic
+
+def real_address(dns):
+    assert query(dns, NAME) == REAL
+
+def ordinary_address(dns):
+    assert query(dns, ORDINARY) == REAL
+
+def ptr_record(dns, synthetic):
+    reverse = ".".join(reversed(synthetic.split("."))) + ".in-addr.arpa"
+    assert wait_for(lambda: query(dns, reverse, 12)) == NAME
+
+def main():
+    dns = check("connect to tailnet", connect)
     if ROLE == "client":
-        synthetic = wait_for(lambda: query(dns, NAME))
-        assert synthetic.startswith("10.254."), synthetic
-        assert query(dns, ORDINARY) == REAL
-        reverse = ".".join(reversed(synthetic.split("."))) + ".in-addr.arpa"
-        assert wait_for(lambda: query(dns, reverse, 12)) == NAME
-        wait_for(lambda: http(synthetic))
-        wait_for(lambda: http(synthetic, tls=True))
+        synthetic = check("authorized synthetic DNS", lambda: synthetic_address(dns))
+        check("ordinary DNS passthrough", lambda: ordinary_address(dns))
+        check("synthetic PTR record", lambda: ptr_record(dns, synthetic))
+        check("HTTP through gateway", lambda: wait_for(lambda: http(synthetic)))
+        check("HTTPS through gateway", lambda: wait_for(lambda: http(synthetic, tls=True)))
         # UDP forwarding is not implemented by the gateway yet; retain a visible expected-red probe.
-        try:
-            socks_udp(synthetic, 9000, b"udp")
-            raise AssertionError("UDP unexpectedly succeeded; update this probe")
-        except socket.timeout: print("expected red: UDP proxy is not implemented")
+        expected_red("UDP through gateway", lambda: socks_udp(synthetic, 9000, b"udp"))
         open("/auth/authorized-complete", "w").close()
         wait_for(lambda: os.path.exists("/auth/denied-complete"))
         wait_for(lambda: os.path.exists("/auth/gateway-dns-complete"))
     elif ROLE == "denied":
         wait_for(lambda: os.path.exists("/auth/authorized-complete"))
-        assert query(dns, NAME) == REAL
+        check("denied DNS returns real address", lambda: real_address(dns))
         open("/auth/denied-complete", "w").close()
     else:
         # Keep this verifier behind the authorizing client.  Compose treats
         # every successful test-container exit as terminal, so allowing this
         # short DNS-only check to finish first would abort the HTTP tests.
         wait_for(lambda: os.path.exists("/auth/authorized-complete"))
-        assert query(dns, NAME) == REAL
+        check("gateway DNS returns real address", lambda: real_address(dns))
         open("/auth/gateway-dns-complete", "w").close()
     print("E2E %s passed (dns=%s)" % (ROLE, dns))
     if ROLE != "client":
         # The client is the compose test coordinator.  These peer-specific
         # checkers remain alive until it observes their completion; otherwise
         # --abort-on-container-exit would stop the suite at the first pass.
+        summary()
         while True:
             time.sleep(60)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        summary()
