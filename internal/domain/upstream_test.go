@@ -20,6 +20,13 @@ func TestNodeAttrConfiguresTagKeyedMultiRangeGateway(t *testing.T) {
 	}
 }
 
+func TestNodeAttrAllowsRouteDiscoveryWithoutGatewayOverride(t *testing.T) {
+	got, ok := ConfigFromNodeAttrs(map[string]json.RawMessage{NodeConfigCapability: json.RawMessage(`[{"upstreamDNS":"system"}]`)})
+	if !ok || got.UpstreamDNS != "system" || got.Gateways != nil {
+		t.Fatalf("config = %#v, ok = %v", got, ok)
+	}
+}
+
 func TestNodeAttrsRejectInvalidDuplicateAndOverlappingRanges(t *testing.T) {
 	tests := []string{
 		`[{"upstreamDNS":"system","gateways":{"tag:home":{"range":["10.254.0.0/24","10.254.0.0/24"]}}}]`,
@@ -30,6 +37,28 @@ func TestNodeAttrsRejectInvalidDuplicateAndOverlappingRanges(t *testing.T) {
 		if _, ok := ConfigFromNodeAttrs(map[string]json.RawMessage{NodeConfigCapability: json.RawMessage(raw)}); ok {
 			t.Fatalf("accepted ambiguous gateway configuration: %s", raw)
 		}
+	}
+}
+
+func TestDNSReturnsUnavailableForNewProtectedNameWithoutTopologyButKeepsLease(t *testing.T) {
+	source := netip.MustParseAddr("100.64.0.2")
+	caps := map[string]json.RawMessage{Capability: json.RawMessage(`[{"gateway":"tag:home","resources":[{"domain":"app.example.com"}]}]`)}
+	allocator := NewAllocator()
+	service := &Service{
+		Identity:    fakeIdentity{source: caps},
+		Gateways:    map[string]Gateway{},
+		Allocations: allocator,
+		GatewayTopology: func(context.Context) (map[string]Gateway, error) {
+			return map[string]Gateway{}, nil
+		},
+	}
+	if _, outcome := service.DNSAnswer(context.Background(), source, "app.example.com"); outcome != DNSUnavailable {
+		t.Fatalf("new protected name outcome = %v, want unavailable", outcome)
+	}
+	if want, err := allocator.Allocate("tag:home", []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}, "app.example.com"); err != nil {
+		t.Fatal(err)
+	} else if got, outcome := service.DNSAnswer(context.Background(), source, "app.example.com"); outcome != DNSSynthesized || got != want {
+		t.Fatalf("leased name = %s/%v, want %s/synthesized", got, outcome, want)
 	}
 }
 

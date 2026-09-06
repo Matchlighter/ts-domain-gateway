@@ -2,12 +2,16 @@ package domain
 
 import (
 	"context"
+	"fmt"
+	"net/netip"
+	"sort"
 	"strings"
 )
 
 type TaggedNode struct {
-	Address string
-	Tags    map[string]struct{}
+	Address       string
+	Tags          map[string]struct{}
+	PrimaryRoutes []netip.Prefix
 }
 
 // TaggedNodeSource supplies the current tailnet node inventory. It is kept
@@ -15,6 +19,49 @@ type TaggedNode struct {
 // authorize a client or a gateway.
 type TaggedNodeSource interface {
 	TaggedNodes(context.Context) ([]TaggedNode, error)
+}
+
+// DiscoverGatewayRoutes derives the active synthetic prefixes for every
+// tagged gateway cluster from stable Tailnet Status PrimaryRoutes. Duplicate
+// routes within one tag are expected in HA; overlap across tags is ambiguous
+// and therefore rejected.
+func DiscoverGatewayRoutes(nodes []TaggedNode) (map[string][]netip.Prefix, error) {
+	routes := map[string][]netip.Prefix{}
+	for _, node := range nodes {
+		for tag := range node.Tags {
+			if !strings.HasPrefix(tag, "tag:") {
+				continue
+			}
+			for _, prefix := range node.PrimaryRoutes {
+				if !prefix.IsValid() || !prefix.Addr().Is4() || prefix != prefix.Masked() {
+					return nil, fmt.Errorf("invalid active route %q for %s", prefix, tag)
+				}
+				duplicate := false
+				for _, prior := range routes[tag] {
+					if prefix == prior {
+						duplicate = true
+					}
+				}
+				if !duplicate {
+					routes[tag] = append(routes[tag], prefix)
+				}
+			}
+		}
+	}
+	seen := map[string]string{}
+	for tag, prefixes := range routes {
+		sort.Slice(prefixes, func(i, j int) bool { return prefixes[i].String() < prefixes[j].String() })
+		for _, prefix := range prefixes {
+			for key, owner := range seen {
+				prior, _ := netip.ParsePrefix(key)
+				if owner != tag && prefix.Overlaps(prior) {
+					return nil, fmt.Errorf("active route %s overlaps %s for %s", prefix, prior, owner)
+				}
+			}
+			seen[prefix.String()] = tag
+		}
+	}
+	return routes, nil
 }
 
 // ResolveTags resolves a tag expression against a fresh tailnet inventory.

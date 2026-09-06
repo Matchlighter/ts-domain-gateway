@@ -27,6 +27,7 @@ type AllocationStore interface {
 	Load(context.Context, *Allocator) error
 	Save(context.Context, *Allocator) error
 	Allocate(context.Context, *Allocator, string, []netip.Prefix, string, time.Time, time.Duration) (netip.Addr, error)
+	LookupKey(context.Context, *Allocator, string, string, time.Time, time.Duration) (netip.Addr, bool, error)
 	Lookup(context.Context, *Allocator, netip.Addr, time.Time, time.Duration) (Mapping, bool, error)
 }
 
@@ -292,6 +293,32 @@ func (s *SQLStore) Lookup(ctx context.Context, a *Allocator, ip netip.Addr, now 
 	}
 	a.RememberUntil(mapping.Gateway, mapping.Domain, ip, now.Add(lease))
 	return mapping, true, s.renew(ctx, mapping.Gateway, mapping.Domain, now, lease, true)
+}
+
+// LookupKey returns a still-live mapping without requiring its historical
+// gateway range to remain currently active. DNS uses this before discovery so
+// a temporary route observation failure cannot churn an existing lease.
+func (s *SQLStore) LookupKey(ctx context.Context, a *Allocator, gateway, domain string, now time.Time, lease time.Duration) (netip.Addr, bool, error) {
+	if ip, ok := a.LookupKeyLive(gateway, domain, now); ok {
+		return ip, true, s.renew(ctx, gateway, domain, now, lease, false)
+	}
+	query := `SELECT ip FROM domain_gateway_allocations WHERE gateway = ? AND domain = ? AND expires_at > ?`
+	if s.postgres {
+		query = `SELECT ip FROM domain_gateway_allocations WHERE gateway = $1 AND domain = $2 AND expires_at > $3`
+	}
+	var raw string
+	if err := s.db.QueryRowContext(ctx, query, gateway, domain, now.UnixNano()).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return netip.Addr{}, false, nil
+		}
+		return netip.Addr{}, false, err
+	}
+	ip, err := netip.ParseAddr(raw)
+	if err != nil {
+		return netip.Addr{}, false, err
+	}
+	a.RememberUntil(gateway, domain, ip, now.Add(lease))
+	return ip, true, s.renew(ctx, gateway, domain, now, lease, true)
 }
 
 func (a *Allocator) Load(path string) error {

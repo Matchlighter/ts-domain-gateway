@@ -5,7 +5,8 @@
             "src": [
                 "group:whatever"
             ],
-            // The app config must be made available to both the DNS authority and selected egress tag.
+            // Both DNS and egress need this authorization grant. Only the
+            // separate domain-gateway-config NodeAttr below targets DNS.
             "dst": [
                 "tag:gateway1",
                 "tag:dns"
@@ -13,8 +14,6 @@
             "app": {
                 "matchlighter.net/cap/domain-gateway": [
                     {
-                        // Can be anything so long as it matches what's in the "gateways" configuration/nodeAttrs of the DNS server.
-                        // Best practice though is to set it to the tag your gateways are configured with.
                         "gateway": "tag:gateway1",
                         // Any and all requests to matched _domains_ (regardless of port) will be routed through the specified gateway
                         // The port value defines policy
@@ -66,7 +65,8 @@
     ],
     "nodeAttrs": [
         {
-            // Make sure the DNS server is aware of the configured gateways and their synthetic IP ranges
+            // DNS receives only its resolver setting; active gateway ranges are
+            // discovered from the tagged egress cluster.
             "target": [
                 "tag:dns",
             ],
@@ -74,11 +74,9 @@
                 "matchlighter.net/cap/domain-gateway-config": [{
                     // system chooses a non-Tailscale /etc/resolv.conf resolver.
                     "upstreamDNS": "system",
-                    "gateways": {
-                        "tag:gateway1": {
-                            "range": ["10.254.0.0/18"]
-                        }
-                    },
+                    // gateways is omitted: DNS discovers active PrimaryRoutes
+                    // from the tag:gateway1 cluster. Add it only as an explicit
+                    // administrator override, which logs a mismatch warning.
                 }]
             }
         },

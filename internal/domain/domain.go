@@ -162,8 +162,10 @@ func Parse(capmap map[string]json.RawMessage, gateways map[string]Gateway) []Gra
 		if json.Unmarshal(entry, &g) != nil || g.Gateway == "" || len(g.Resources) == 0 {
 			continue
 		}
-		if _, ok := gateways[g.Gateway]; !ok {
-			continue
+		if gateways != nil {
+			if _, ok := gateways[g.Gateway]; !ok {
+				continue
+			}
 		}
 		valid := true
 		for i := range g.Resources {

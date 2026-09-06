@@ -46,7 +46,7 @@ iptables -t nat -A PREROUTING -d 10.254.0.0/18 -p tcp -j REDIRECT --to-ports 150
 Set `gateway_listen` to `0.0.0.0:15001`. The process uses
 `SO_ORIGINAL_DST`, so authorization sees the client-visible synthetic address
 and port, never its local redirect address. In tsnet egress mode the subnet
-router advertises the NodeAttr prefixes and receives the original destination
+router advertises its local egress-assignment prefixes and receives the original destination
 in its userspace fallback handler instead.
 
 ## Daemon configuration
@@ -74,6 +74,14 @@ are rejected; move their values into the `tsnet` object.
   // it is created automatically. SQLite is one authority only; DNS HA needs
   // a PostgreSQL URL shared by every DNS replica.
   "database": "postgres://domain_gateway:secret@db.example:5432/domain_gateway?sslmode=require",
+
+  // Required only by the egress role. This local assignment drives flow
+  // enforcement and tsnet route advertisement. In tailscaled mode, advertise
+  // the same ranges with tailscaled and redirect their TCP traffic above.
+  "egress": {
+    "tag": "tag:gateway1",
+    "ranges": ["10.254.0.0/18"]
+  },
 
   "tsnet": {
     // Persistent tsnet state and identity. dir is required with -mode tsnet.
@@ -114,14 +122,18 @@ limited to a single DNS authority and is not an HA deployment.
 
 ## Headscale policy and routing
 
-Configure upstream resolution and every gateway segment in the NodeAttr
-application payload shown in [sample.jsonc](sample.jsonc), not in daemon
-configuration. Each daemon reads its own typed setting from its self CapMap:
-the tsnet LocalClient in tsnet mode, or local tailscaled LocalAPI in tailscaled
-mode. There is deliberately no local gateway map.
+Configure upstream resolution in the DNS NodeAttr application payload shown in
+[sample.jsonc](sample.jsonc). By default DNS discovers each tagged gateway
+cluster's active synthetic ranges from stable Tailnet Status `PrimaryRoutes`.
+`gateways` in that NodeAttr is optional: when present it is an explicit
+administrator override, wins over discovery, and logs a warning on mismatch.
+The NodeAttr can target only `tag:dns`; egress instead requires the local
+`egress` assignment above and never reads this NodeAttr.
 
 The DNS node uses its configured resolver for ordinary forwarded names. An
-egress node uses its own setting to resolve the real backend. `system` selects
+egress node uses its transport's resolver to resolve the real backend: the
+system resolver in tailscaled mode, or the advertised Tailnet resolver in
+tsnet mode. `system` selects
 the first non-Tailscale resolver in `/etc/resolv.conf`; `100.100.100.100` is
 ignored to avoid a DNS loop. The policy compiler/control plane must preserve
 the object-valued `app` payload in NodeCapMap.
@@ -132,13 +144,15 @@ Configure clients to send protected resource suffixes to the DNS node.
 Unauthorized resource queries and ordinary names are forwarded upstream;
 authorized AAAA queries receive NODATA so IPv6 cannot bypass the gateway.
 
-Every interchangeable HA egress member must receive the same validated
-NodeAttr prefix configuration and must have equivalent backend reachability.
-Never route a segment prefix to a gateway that reaches a different backend.
-Advertise the same synthetic prefix from each egress member so Tailscale can
+Every interchangeable HA egress member must use the same local egress
+assignment and have equivalent backend reachability. Never route a segment
+prefix to a gateway that reaches a different backend. Advertise the same
+synthetic prefix from each egress member so Tailscale can
 select an available subnet router. Advertise every DNS replica as a tailnet
 resolver; tsnet egress tries each advertised resolver for its PTR lookup. DNS
-replicas must share PostgreSQL and identical gateway NodeAttrs.
+replicas must share PostgreSQL. If a new protected mapping has no active
+discovered route, DNS returns `SERVFAIL` rather than forwarding the name
+upstream. Existing leased mappings remain answerable until their lease expires.
 
 Build and run the focused proof suite with:
 

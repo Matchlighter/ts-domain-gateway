@@ -35,7 +35,7 @@ func ConfigFromNodeAttrs(caps map[string]json.RawMessage) (NodeConfig, bool) {
 				Ranges []string `json:"range"`
 			} `json:"gateways"`
 		}
-		if json.Unmarshal(raw, &config) != nil || config.UpstreamDNS == "" || len(config.Gateways) == 0 {
+		if json.Unmarshal(raw, &config) != nil || config.UpstreamDNS == "" || (config.Gateways != nil && len(config.Gateways) == 0) {
 			return NodeConfig{}, false
 		}
 		resolver := config.UpstreamDNS

@@ -154,8 +154,9 @@ func (l *LocalAPI) TaggedNodes(ctx context.Context) ([]TaggedNode, error) {
 }
 
 type statusNode struct {
-	TailscaleIPs []netip.Addr `json:"TailscaleIPs"`
-	Tags         []string     `json:"Tags"`
+	TailscaleIPs  []netip.Addr   `json:"TailscaleIPs"`
+	Tags          []string       `json:"Tags"`
+	PrimaryRoutes []netip.Prefix `json:"PrimaryRoutes"`
 }
 
 func taggedNodes(nodes []statusNode) []TaggedNode {
@@ -170,7 +171,7 @@ func taggedNodes(nodes []statusNode) []TaggedNode {
 		}
 		for _, address := range node.TailscaleIPs {
 			if address.Is4() {
-				result = append(result, TaggedNode{Address: address.String(), Tags: tags})
+				result = append(result, TaggedNode{Address: address.String(), Tags: tags, PrimaryRoutes: node.PrimaryRoutes})
 			}
 		}
 	}
@@ -195,7 +196,18 @@ type Service struct {
 	Denied      atomic.Uint64
 	Lease       time.Duration
 	Now         func() time.Time
+	// GatewayTopology is DNS's active route-discovery seam. It is consulted
+	// only for a new protected mapping; an existing lease remains answerable.
+	GatewayTopology func(context.Context) (map[string]Gateway, error)
 }
+
+type DNSOutcome uint8
+
+const (
+	DNSPassthrough DNSOutcome = iota
+	DNSSynthesized
+	DNSUnavailable
+)
 
 func (s *Service) lease() time.Duration {
 	if s.Lease > 0 {
@@ -211,30 +223,44 @@ func (s *Service) now() time.Time {
 }
 
 func (s *Service) DNS(ctx context.Context, source netip.Addr, name string) (netip.Addr, bool) {
+	ip, outcome := s.DNSAnswer(ctx, source, name)
+	return ip, outcome == DNSSynthesized
+}
+
+// DNSAnswer distinguishes an ordinary passthrough name from an authorized
+// protected name whose route topology is unavailable.
+func (s *Service) DNSAnswer(ctx context.Context, source netip.Addr, name string) (netip.Addr, DNSOutcome) {
 	if checker, ok := s.Identity.(GatewaySource); ok {
 		if gateway, err := checker.IsGateway(ctx, source, s.Gateways); err != nil || gateway {
 			s.Passthrough.Add(1)
-			return netip.Addr{}, false
+			return netip.Addr{}, DNSPassthrough
 		}
 	}
 	name, ok := NormalName(name)
 	if !ok {
 		s.Passthrough.Add(1)
-		return netip.Addr{}, false
+		return netip.Addr{}, DNSPassthrough
 	}
 	caps, err := s.Identity.Capabilities(ctx, source, netip.Addr{})
 	if err != nil {
 		s.Passthrough.Add(1)
-		return netip.Addr{}, false
+		return netip.Addr{}, DNSPassthrough
 	}
-	grants := Parse(caps, s.Gateways)
+	// Discovery is deliberately after authorization. A gateway name is policy
+	// input, while its active routes are operational state. Static callers keep
+	// the historic unknown-gateway rejection at the parsing seam.
+	grantGateways := s.Gateways
+	if s.GatewayTopology != nil {
+		grantGateways = nil
+	}
+	grants := Parse(caps, grantGateways)
 	gateway := ""
 	for _, g := range grants {
 		for _, r := range g.Resources {
 			if match(r.Domain, name) {
 				if gateway != "" && gateway != g.Gateway {
 					s.Passthrough.Add(1)
-					return netip.Addr{}, false
+					return netip.Addr{}, DNSPassthrough
 				}
 				gateway = g.Gateway
 			}
@@ -242,25 +268,51 @@ func (s *Service) DNS(ctx context.Context, source netip.Addr, name string) (neti
 	}
 	if gateway == "" {
 		s.Passthrough.Add(1)
-		return netip.Addr{}, false
+		return netip.Addr{}, DNSPassthrough
+	}
+	if s.AllocationStore != nil {
+		if ip, found, err := s.AllocationStore.LookupKey(ctx, s.Allocations, gateway, name, s.now(), s.lease()); err != nil {
+			s.Passthrough.Add(1)
+			return netip.Addr{}, DNSUnavailable
+		} else if found {
+			s.Synthesized.Add(1)
+			return ip, DNSSynthesized
+		}
+	} else if ip, found := s.Allocations.LookupKeyLive(gateway, name, s.now()); found {
+		s.Synthesized.Add(1)
+		return ip, DNSSynthesized
+	}
+	gateways := s.Gateways
+	if s.GatewayTopology != nil {
+		var err error
+		gateways, err = s.GatewayTopology(ctx)
+		if err != nil {
+			s.Passthrough.Add(1)
+			return netip.Addr{}, DNSUnavailable
+		}
+	}
+	gatewayConfig, found := gateways[gateway]
+	if !found || len(gatewayConfig.Prefixes) == 0 {
+		s.Passthrough.Add(1)
+		return netip.Addr{}, DNSUnavailable
 	}
 	var ip netip.Addr
 	if s.AllocationStore != nil {
-		ip, err = s.AllocationStore.Allocate(ctx, s.Allocations, gateway, s.Gateways[gateway].Prefixes, name, s.now(), s.lease())
+		ip, err = s.AllocationStore.Allocate(ctx, s.Allocations, gateway, gatewayConfig.Prefixes, name, s.now(), s.lease())
 	} else {
-		ip, err = s.Allocations.Allocate(gateway, s.Gateways[gateway].Prefixes, name)
+		ip, err = s.Allocations.Allocate(gateway, gatewayConfig.Prefixes, name)
 	}
 	if err != nil {
 		s.Passthrough.Add(1)
-		return netip.Addr{}, false
+		return netip.Addr{}, DNSUnavailable
 	}
 	// StatePath remains for callers using the original JSON file API.
 	if s.AllocationStore == nil && s.StatePath != "" && s.Allocations.Save(s.StatePath) != nil {
 		s.Passthrough.Add(1)
-		return netip.Addr{}, false
+		return netip.Addr{}, DNSUnavailable
 	}
 	s.Synthesized.Add(1)
-	return ip, true
+	return ip, DNSSynthesized
 }
 
 // PTRMapping resolves a synthetic address locally first, then through the
