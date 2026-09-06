@@ -17,7 +17,7 @@ func (n taggedNodes) TaggedNodes(context.Context) ([]domain.TaggedNode, error) {
 
 func TestParseCommandSeparatesRoleTransportAndConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"tsnet":{"dir":"from-file","hostname":"from-file-host","auth_key":"from-file-key","tags":["tag:file"]},"database":"postgres://from-file"}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"tsnet":{"dir":"from-file","hostname":"from-file-host","auth_key":"from-file-key","tags":["tag:file"]},"database":"postgres://from-file","egress":{"tag":"tag:file","ranges":["10.254.0.0/18"]}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cmd, err := parseCommand([]string{"egress", "-config", path, "-mode", "tailscaled", "-gateway-listen", "127.0.0.1:15001", "-tsnet-tags", "tag:one,tag:two"})

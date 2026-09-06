@@ -22,7 +22,7 @@ func TestNodeAttrConfiguresTagKeyedMultiRangeGateway(t *testing.T) {
 
 func TestNodeAttrAllowsRouteDiscoveryWithoutGatewayOverride(t *testing.T) {
 	got, ok := ConfigFromNodeAttrs(map[string]json.RawMessage{NodeConfigCapability: json.RawMessage(`[{"upstreamDNS":"system"}]`)})
-	if !ok || got.UpstreamDNS != "system" || got.Gateways != nil {
+	if !ok || got.UpstreamDNS != "system" || len(got.Gateways) != 0 {
 		t.Fatalf("config = %#v, ok = %v", got, ok)
 	}
 }
