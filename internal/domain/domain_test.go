@@ -47,6 +47,44 @@ func TestMalformedPortFailsClosed(t *testing.T) {
 	}
 }
 
+func TestResourceStringShorthandNormalizesForAuthorization(t *testing.T) {
+	gateways := map[string]Gateway{"tag:home": {Prefix: netip.MustParsePrefix("10.254.0.0/29")}}
+	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
+		{"gateway":"tag:home","resources":[
+			{"domain":"object.example.net","ports":["udp:53"]},
+			"example.net:443,80"
+		]}
+	]`)}, gateways)
+	if len(grants) != 1 {
+		t.Fatalf("parsed grants = %d, want 1", len(grants))
+	}
+	if !Authorize(grants, "tag:home", "example.net", "tcp", 443) || !Authorize(grants, "tag:home", "example.net", "tcp", 80) {
+		t.Fatal("string shorthand did not authorize its TCP ports")
+	}
+	if Authorize(grants, "tag:home", "example.net", "udp", 443) || Authorize(grants, "tag:home", "example.net", "tcp", 53) {
+		t.Fatal("string shorthand authorized an unlisted protocol or port")
+	}
+	if !Authorize(grants, "tag:home", "object.example.net", "udp", 53) {
+		t.Fatal("object resource semantics changed when mixed with shorthand")
+	}
+}
+
+func TestResourceStringShorthandFailsClosed(t *testing.T) {
+	gateways := map[string]Gateway{"tag:home": {Prefix: netip.MustParsePrefix("10.254.0.0/29")}}
+	for _, resource := range []string{
+		"example:443", "example.net", ":443", "example.net:",
+		"example.net:443,", "example.net:443,,80", "example.net:443:80",
+		"example.net:http", "example.net:0", "example.net:65536",
+	} {
+		t.Run(resource, func(t *testing.T) {
+			grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[{"gateway":"tag:home","resources":["` + resource + `"]}]`)}, gateways)
+			if Authorize(grants, "tag:home", "example.net", "tcp", 443) {
+				t.Fatalf("malformed shorthand %q authorized traffic", resource)
+			}
+		})
+	}
+}
+
 func TestServiceReauthorizesFlowsAndRestoresAllocations(t *testing.T) {
 	gateways := map[string]Gateway{"tag:home": {Prefix: netip.MustParsePrefix("10.254.0.0/29")}}
 	source := netip.MustParseAddr("100.64.0.2")

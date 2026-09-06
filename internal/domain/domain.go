@@ -20,6 +20,32 @@ type Resource struct {
 	Domain string   `json:"domain"`
 	Ports  []string `json:"ports"`
 }
+
+// UnmarshalJSON accepts either the standard resource object or the concise
+// domain:port[,port...] form, whose listed ports are TCP.
+func (r *Resource) UnmarshalJSON(data []byte) error {
+	if len(data) > 0 && data[0] == '"' {
+		var shorthand string
+		if err := json.Unmarshal(data, &shorthand); err != nil {
+			return err
+		}
+		domain, ports, ok := strings.Cut(shorthand, ":")
+		if !ok || domain == "" || ports == "" || strings.Contains(ports, ":") {
+			return errors.New("invalid resource shorthand")
+		}
+		parts := strings.Split(ports, ",")
+		for i, port := range parts {
+			if port == "" {
+				return errors.New("invalid resource shorthand")
+			}
+			parts[i] = "tcp:" + port
+		}
+		r.Domain, r.Ports = domain, parts
+		return nil
+	}
+	type resource Resource
+	return json.Unmarshal(data, (*resource)(r))
+}
 type Grant struct {
 	Gateway   string     `json:"gateway"`
 	Resources []Resource `json:"resources"`
