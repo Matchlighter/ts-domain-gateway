@@ -97,8 +97,6 @@ are rejected; move their values into the `tsnet` object.
     "tags": ["tag:dns"]
   },
 
-  // The special *.tags DNS namespace is populated from current Tailscale
-  // status; it needs no duplicate tagged-node configuration.
 }
 ```
 
