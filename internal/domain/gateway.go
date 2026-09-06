@@ -68,7 +68,13 @@ func (s *Service) proxy(ctx context.Context, client net.Conn) {
 // ProxyTCP is shared by the kernel and tsnet dataplanes. dst is always the
 // client-visible synthetic destination, never an internal listener address.
 func (s *Service) ProxyTCP(ctx context.Context, client net.Conn, src, dst netip.AddrPort) {
-	names, err := net.DefaultResolver.LookupAddr(ctx, dst.Addr().String())
+	lookupPTR := s.PTRLookup
+	if lookupPTR == nil {
+		lookupPTR = func(ctx context.Context, ip netip.Addr) ([]string, error) {
+			return net.DefaultResolver.LookupAddr(ctx, ip.String())
+		}
+	}
+	names, err := lookupPTR(ctx, dst.Addr())
 	if err != nil || len(names) != 1 {
 		return
 	}

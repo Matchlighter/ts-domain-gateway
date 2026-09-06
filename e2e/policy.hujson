@@ -1,0 +1,38 @@
+{
+  "tagOwners": {
+    "tag:client": ["e2e@example.com"],
+    "tag:dns": ["e2e@example.com"],
+    "tag:gateway1": ["e2e@example.com"]
+  },
+  "grants": [
+    {
+      "src": ["tag:client", "tag:gateway1"],
+      "dst": ["tag:dns", "tag:gateway1", "10.254.0.0/18"],
+      "ip": ["udp:53"],
+      "app": {
+        "matchlighter.net/cap/domain-gateway": [{
+          "gateway": "tag:gateway1",
+          "resources": [{"domain": "example.com", "ports": ["tcp:443"]}]
+        }]
+      }
+    },
+    {"src": ["tag:client"], "dst": ["10.254.0.0/18"], "ip": ["tcp:443"], "via": ["tag:gateway1"]}
+  ],
+  "autoApprovers": {"routes": {"10.254.0.0/18": ["tag:gateway1"]}},
+  "nodeAttrs": [
+    {
+      "target": ["tag:dns"],
+      "app": {"matchlighter.net/cap/domain-gateway-config": [{
+        "upstreamDNS": "system",
+        "gateways": [{"tag": "tag:gateway1", "prefix": "10.254.0.0/18"}]
+      }]}
+    },
+    {
+      "target": ["tag:gateway1"],
+      "app": {"matchlighter.net/cap/domain-gateway-config": [{
+        "upstreamDNS": "system",
+        "gateways": [{"tag": "tag:gateway1", "prefix": "10.254.0.0/18"}]
+      }]}
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+# Build from a checkout of Headscale PR #3121:
+# docker build -f e2e/Dockerfile.headscale -t domain-gateway-headscale:pr-3121 /path/to/headscale
+FROM golang:1.27.0-trixie AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /headscale ./cmd/headscale
+
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install --no-install-recommends --yes ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=build /headscale /usr/local/bin/headscale
+ENTRYPOINT ["/usr/local/bin/headscale"]

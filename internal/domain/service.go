@@ -101,6 +101,9 @@ type Service struct {
 	Gateways    map[string]Gateway
 	Allocations *Allocator
 	StatePath   string
+	// PTRLookup resolves synthetic addresses through the DNS authority. It is
+	// overridden by tsnet gateways so lookup stays on the tailnet DNS path.
+	PTRLookup   func(context.Context, netip.Addr) ([]string, error)
 	Synthesized atomic.Uint64
 	Passthrough atomic.Uint64
 	Allowed     atomic.Uint64

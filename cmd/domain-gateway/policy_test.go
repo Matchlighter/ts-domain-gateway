@@ -1,0 +1,53 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/matchlighter/headscale-domain-proxies/internal/domain"
+	"github.com/tailscale/hujson"
+)
+
+func TestSampleUsesValuedNodeAttrAppPayload(t *testing.T) {
+	path := filepath.Join("..", "..", "sample.jsonc")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	standard, err := hujson.Standardize(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy struct {
+		NodeAttrs []struct {
+			App map[string]json.RawMessage `json:"app"`
+		}
+	}
+	if err := json.Unmarshal(standard, &policy); err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.NodeAttrs) == 0 {
+		t.Fatal("sample has no NodeAttrs")
+	}
+	for _, nodeAttr := range policy.NodeAttrs {
+		raw, ok := nodeAttr.App[domain.NodeConfigCapability]
+		if !ok {
+			t.Fatalf("NodeAttr must use app.%s for its valued payload", domain.NodeConfigCapability)
+		}
+		if _, ok := domain.ConfigFromNodeAttrs(map[string]json.RawMessage{domain.NodeConfigCapability: raw}); !ok {
+			t.Fatal("sample app payload is not a valid domain gateway configuration")
+		}
+	}
+}
+
+func TestAuthKeyDoesNotAdvertiseTags(t *testing.T) {
+	server, err := newTSNet(config{TSNetDir: t.TempDir(), TSNetAuthKey: "tskey-auth-test", TSNetTags: []string{"tag:dns"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(server.AdvertiseTags) != 0 {
+		t.Fatalf("auth-key node must not request tags: %v", server.AdvertiseTags)
+	}
+}

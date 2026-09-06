@@ -170,7 +170,18 @@ func newTSNet(c config) (*tsnet.Server, error) {
 	if c.TSNetDir == "" {
 		return nil, fmt.Errorf("tsnet_dir is required for userspace mode")
 	}
-	return &tsnet.Server{Dir: c.TSNetDir, Hostname: c.TSNetHostname, AuthKey: c.TSNetAuthKey, AdvertiseTags: c.TSNetTags}, nil
+	authKey := c.TSNetAuthKey
+	if authKey == "" {
+		authKey = os.Getenv("TS_AUTHKEY")
+	}
+	advertiseTags := c.TSNetTags
+	if authKey != "" {
+		// Headscale (correctly) takes tags from a tagged preauth key and
+		// rejects a duplicate client-side request. This also prevents a local
+		// process setting tags beyond those granted by its enrollment key.
+		advertiseTags = nil
+	}
+	return &tsnet.Server{Dir: c.TSNetDir, Hostname: c.TSNetHostname, AuthKey: authKey, AdvertiseTags: advertiseTags}, nil
 }
 
 func runGateway(ctx context.Context, c config, space string) {
@@ -213,7 +224,21 @@ func runGateway(ctx context.Context, c config, space string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := (&domain.Service{Identity: identity, Gateways: gs}).ServeTSNetGateway(ctx, server); err != nil && err != context.Canceled {
+	dnsConfig, err := client.DNSConfig(ctx)
+	if err != nil || len(dnsConfig.Resolvers) == 0 || dnsConfig.Resolvers[0].Addr == "" {
+		log.Fatal("userspace gateway requires an advertised Tailscale DNS resolver")
+	}
+	dnsAddr := dnsConfig.Resolvers[0].Addr
+	if _, _, err := net.SplitHostPort(dnsAddr); err != nil {
+		dnsAddr = net.JoinHostPort(dnsAddr, "53")
+	}
+	resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return server.Dial(ctx, network, dnsAddr)
+	}}
+	s := &domain.Service{Identity: identity, Gateways: gs, PTRLookup: func(ctx context.Context, ip netip.Addr) ([]string, error) {
+		return resolver.LookupAddr(ctx, ip.String())
+	}}
+	if err := s.ServeTSNetGateway(ctx, server); err != nil && err != context.Canceled {
 		log.Fatal(err)
 	}
 }

@@ -48,8 +48,8 @@ not daemon config:
 ```jsonc
 {
   "nodeAttrs": [
-    { "target": ["tag:dns"], "attr": [{ "matchlighter.net/cap/domain-gateway-config": { "upstreamDNS": "system", "gateways": [{ "tag": "tag:gateway1", "prefix": "10.254.0.0/18" }] } }] },
-    { "target": ["tag:gateway1"], "attr": [{ "matchlighter.net/cap/domain-gateway-config": { "upstreamDNS": "10.0.0.53:53", "gateways": [{ "tag": "tag:gateway1", "prefix": "10.254.0.0/18" }] } }] }
+    { "target": ["tag:dns"], "app": { "matchlighter.net/cap/domain-gateway-config": [{ "upstreamDNS": "system", "gateways": [{ "tag": "tag:gateway1", "prefix": "10.254.0.0/18" }] }] } },
+    { "target": ["tag:gateway1"], "app": { "matchlighter.net/cap/domain-gateway-config": [{ "upstreamDNS": "10.0.0.53:53", "gateways": [{ "tag": "tag:gateway1", "prefix": "10.254.0.0/18" }] }] } }
   ]
 }
 ```
@@ -60,9 +60,9 @@ no local `gateways` map: the NodeAttr object is the only source of tag/prefix
 mapping. The DNS node uses its resolver for ordinary forwarded lookups, while a
 gateway uses its own setting for real backend DNS. `system` selects the first non-Tailscale
 nameserver in `/etc/resolv.conf`; `100.100.100.100` is ignored to avoid loops.
-This is the object-valued Tailscale NodeAttr form; deployments need a policy
-compiler/control plane that preserves object attributes in NodeCapMap. Current
-string-only Headscale NodeAttr handling cannot represent this payload.
+This is the object-valued Tailscale NodeAttr form. It requires a policy
+compiler/control plane that preserves the `app` payload in NodeCapMap; use
+Headscale PR #3121 until that capability ships in a release.
 
 Run the proof suite with `go test ./...`.
 

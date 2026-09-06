@@ -1,0 +1,25 @@
+server_url: http://127.0.0.1:18080
+listen_addr: 0.0.0.0:8080
+grpc_listen_addr: 0.0.0.0:50443
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+policy:
+  path: /etc/headscale/policy.hujson
+dns:
+  magic_dns: false
+  override_local_dns: true
+  nameservers:
+    global:
+      - 100.64.0.1
+derp:
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+log:
+  level: warn
