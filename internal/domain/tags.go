@@ -1,10 +1,32 @@
 package domain
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 type TaggedNode struct {
 	Address string
 	Tags    map[string]struct{}
+}
+
+// TaggedNodeSource supplies the current tailnet node inventory. It is kept
+// separate from Identity because resolving the special DNS namespace does not
+// authorize a client or a gateway.
+type TaggedNodeSource interface {
+	TaggedNodes(context.Context) ([]TaggedNode, error)
+}
+
+// ResolveTags resolves a tag expression against a fresh tailnet inventory.
+// An unavailable inventory is still a handled .tags request: it must not be
+// forwarded to an unrelated upstream resolver.
+func ResolveTags(ctx context.Context, name string, source TaggedNodeSource) ([]string, bool) {
+	nodes, err := source.TaggedNodes(ctx)
+	if err != nil {
+		_, tagged := TagExpression(name, nil)
+		return nil, tagged
+	}
+	return TagExpression(name, nodes)
 }
 
 // TagExpression resolves a.b.tags. (AND), a-or-b.tags. (OR), and a.no-b.tags. (exclusion).

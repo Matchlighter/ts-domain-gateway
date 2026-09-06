@@ -89,9 +89,8 @@ are rejected; move their values into the `tsnet` object.
     "tags": ["tag:dns"]
   },
 
-  // Optional static data for the special *.tags DNS namespace, not gateway
-  // authorization. Each address is a Tailscale node and tags are its labels.
-  "tagged_nodes": [{"address": "100.64.0.4", "tags": ["tag:ops"]}]
+  // The special *.tags DNS namespace is populated from current Tailscale
+  // status; it needs no duplicate tagged-node configuration.
 }
 ```
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"sort"
 	"sync/atomic"
 	"time"
 )
@@ -119,6 +120,62 @@ func (l *LocalAPI) TailscaleIP(ctx context.Context) (netip.Addr, error) {
 		}
 	}
 	return netip.Addr{}, context.DeadlineExceeded
+}
+
+// TaggedNodes reads the local daemon's current, control-plane-authoritative
+// tailnet status. Tag DNS deliberately does not participate in authorization.
+func (l *LocalAPI) TaggedNodes(ctx context.Context) ([]TaggedNode, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://local-tailscaled/localapi/v0/status", nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := l.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	var status struct {
+		Self *statusNode            `json:"Self"`
+		Peer map[string]*statusNode `json:"Peer"`
+	}
+	if res.StatusCode != http.StatusOK || json.NewDecoder(res.Body).Decode(&status) != nil {
+		return nil, context.DeadlineExceeded
+	}
+	nodes := make([]statusNode, 0, len(status.Peer)+1)
+	if status.Self != nil {
+		nodes = append(nodes, *status.Self)
+	}
+	for _, node := range status.Peer {
+		if node != nil {
+			nodes = append(nodes, *node)
+		}
+	}
+	return taggedNodes(nodes), nil
+}
+
+type statusNode struct {
+	TailscaleIPs []netip.Addr `json:"TailscaleIPs"`
+	Tags         []string     `json:"Tags"`
+}
+
+func taggedNodes(nodes []statusNode) []TaggedNode {
+	result := make([]TaggedNode, 0, len(nodes))
+	for _, node := range nodes {
+		if len(node.Tags) == 0 {
+			continue
+		}
+		tags := make(map[string]struct{}, len(node.Tags))
+		for _, tag := range node.Tags {
+			tags[tag] = struct{}{}
+		}
+		for _, address := range node.TailscaleIPs {
+			if address.Is4() {
+				result = append(result, TaggedNode{Address: address.String(), Tags: tags})
+			}
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Address < result[j].Address })
+	return result
 }
 
 type Service struct {

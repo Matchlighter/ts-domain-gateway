@@ -29,10 +29,6 @@ type config struct {
 	Database         string      `json:"database"`
 	AllocationLease  string      `json:"allocation_lease"`
 	TSNet            tsnetConfig `json:"tsnet"`
-	TaggedNodes      []struct {
-		Address string   `json:"address"`
-		Tags    []string `json:"tags"`
-	}
 }
 
 type tsnetConfig struct {
@@ -341,6 +337,7 @@ func runEgress(ctx context.Context, c config, transport string) {
 
 func runDNS(ctx context.Context, c config, transport string) {
 	var identity domain.Identity
+	var nodes domain.TaggedNodeSource
 	var nodeConfig domain.NodeConfig
 	var listen func() (net.PacketConn, error)
 	if transport == "tailscaled" {
@@ -355,6 +352,7 @@ func runDNS(ctx context.Context, c config, transport string) {
 			log.Fatal(err)
 		}
 		identity = api
+		nodes = api
 		listen = func() (net.PacketConn, error) { return net.ListenPacket("udp", dnsListenAddress(c.Listen, ip)) }
 	} else {
 		server, err := newTSNet(c)
@@ -370,6 +368,7 @@ func runDNS(ctx context.Context, c config, transport string) {
 		}
 		id := domain.TSNetIdentity{Client: client}
 		identity = id
+		nodes = id
 		nodeConfig, err = id.NodeConfig(ctx)
 		if err != nil {
 			log.Fatal("missing or invalid domain-gateway NodeAttr: ", err)
@@ -394,14 +393,6 @@ func runDNS(ctx context.Context, c config, transport string) {
 		lease, _ = time.ParseDuration(c.AllocationLease)
 	}
 	s := &domain.Service{Identity: identity, Gateways: gs, Allocations: alloc, AllocationStore: store, Lease: lease}
-	nodes := make([]domain.TaggedNode, 0, len(c.TaggedNodes))
-	for _, n := range c.TaggedNodes {
-		tags := map[string]struct{}{}
-		for _, tag := range n.Tags {
-			tags[tag] = struct{}{}
-		}
-		nodes = append(nodes, domain.TaggedNode{Address: n.Address, Tags: tags})
-	}
 	conn, err := listen()
 	if err != nil {
 		log.Fatal(err)
@@ -429,7 +420,7 @@ func allocationStore(ctx context.Context, c config) (domain.AllocationStore, fun
 	return nil, func() {}, nil
 }
 
-func serveDNS(ctx context.Context, conn net.PacketConn, s *domain.Service, nodes []domain.TaggedNode, upstreamAddr *net.UDPAddr) {
+func serveDNS(ctx context.Context, conn net.PacketConn, s *domain.Service, nodes domain.TaggedNodeSource, upstreamAddr *net.UDPAddr) {
 	pool := sync.Pool{New: func() any { return make([]byte, 65535) }}
 	jobs := make(chan struct{}, 256)
 	for {
@@ -456,7 +447,7 @@ func serveDNS(ctx context.Context, conn net.PacketConn, s *domain.Service, nodes
 					return
 				}
 			}
-			if ips, tagged := domain.TagExpression(name, nodes); tagged {
+			if ips, tagged := domain.ResolveTags(ctx, name, nodes); tagged {
 				if typ == 1 && len(ips) > 0 {
 					if ip, err := netip.ParseAddr(ips[0]); err == nil {
 						conn.WriteTo(answer(b, end, ip), src)

@@ -62,3 +62,29 @@ func (i TSNetIdentity) NodeConfig(ctx context.Context) (NodeConfig, error) {
 	}
 	return config, nil
 }
+
+// TaggedNodes returns tsnet's current stable LocalClient status inventory.
+func (i TSNetIdentity) TaggedNodes(ctx context.Context) ([]TaggedNode, error) {
+	status, err := i.Client.Status(ctx)
+	if err != nil {
+		return nil, err
+	}
+	nodes := make([]statusNode, 0, len(status.Peer)+1)
+	if status.Self != nil {
+		node := statusNode{TailscaleIPs: status.Self.TailscaleIPs}
+		if status.Self.Tags != nil {
+			node.Tags = status.Self.Tags.AsSlice()
+		}
+		nodes = append(nodes, node)
+	}
+	for _, peer := range status.Peer {
+		if peer != nil {
+			node := statusNode{TailscaleIPs: peer.TailscaleIPs}
+			if peer.Tags != nil {
+				node.Tags = peer.Tags.AsSlice()
+			}
+			nodes = append(nodes, node)
+		}
+	}
+	return taggedNodes(nodes), nil
+}
