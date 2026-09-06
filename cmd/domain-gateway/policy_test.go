@@ -79,7 +79,7 @@ func TestSampleDomainGrantUsesIPPortPolicy(t *testing.T) {
 }
 
 func TestAuthKeyDoesNotAdvertiseTags(t *testing.T) {
-	server, err := newTSNet(config{TSNetDir: t.TempDir(), TSNetAuthKey: "tskey-auth-test", TSNetTags: []string{"tag:dns"}})
+	server, err := newTSNet(config{TSNet: tsnetConfig{Dir: t.TempDir(), AuthKey: "tskey-auth-test", Tags: []string{"tag:dns"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

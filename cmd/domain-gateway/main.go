@@ -23,19 +23,23 @@ import (
 )
 
 type config struct {
-	Listen           string   `json:"dns_listen"`
-	GatewayListen    string   `json:"gateway_listen"`
-	TailscaledSocket string   `json:"tailscaled_socket"`
-	Database         string   `json:"database"`
-	AllocationLease  string   `json:"allocation_lease"`
-	TSNetDir         string   `json:"tsnet_dir"`
-	TSNetHostname    string   `json:"tsnet_hostname"`
-	TSNetAuthKey     string   `json:"tsnet_auth_key"`
-	TSNetTags        []string `json:"tsnet_tags"`
+	Listen           string      `json:"dns_listen"`
+	GatewayListen    string      `json:"gateway_listen"`
+	TailscaledSocket string      `json:"tailscaled_socket"`
+	Database         string      `json:"database"`
+	AllocationLease  string      `json:"allocation_lease"`
+	TSNet            tsnetConfig `json:"tsnet"`
 	TaggedNodes      []struct {
 		Address string   `json:"address"`
 		Tags    []string `json:"tags"`
 	}
+}
+
+type tsnetConfig struct {
+	Dir      string   `json:"dir"`
+	Hostname string   `json:"hostname"`
+	AuthKey  string   `json:"auth_key"`
+	Tags     []string `json:"tags"`
 }
 
 type command struct {
@@ -159,6 +163,15 @@ func parseCommand(args []string) (command, error) {
 	if err != nil {
 		return command{}, err
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return command{}, err
+	}
+	for _, name := range []string{"tsnet_dir", "tsnet_hostname", "tsnet_auth_key", "tsnet_tags"} {
+		if _, found := fields[name]; found {
+			return command{}, fmt.Errorf("%s is no longer supported; use tsnet.%s", name, strings.TrimPrefix(name, "tsnet_"))
+		}
+	}
 	var c config
 	if err := json.Unmarshal(data, &c); err != nil {
 		return command{}, err
@@ -172,10 +185,10 @@ func parseCommand(args []string) (command, error) {
 	fs.StringVar(&c.TailscaledSocket, "tailscaled-socket", c.TailscaledSocket, "tailscaled LocalAPI socket")
 	fs.StringVar(&c.Database, "database", c.Database, "allocation database URL (sqlite:// or postgres://)")
 	fs.StringVar(&c.AllocationLease, "allocation-lease", c.AllocationLease, "synthetic allocation lease duration")
-	fs.StringVar(&c.TSNetDir, "tsnet-dir", c.TSNetDir, "tsnet state directory")
-	fs.StringVar(&c.TSNetHostname, "tsnet-hostname", c.TSNetHostname, "tsnet hostname")
-	fs.StringVar(&c.TSNetAuthKey, "tsnet-auth-key", c.TSNetAuthKey, "tsnet auth key")
-	tags := fs.String("tsnet-tags", strings.Join(c.TSNetTags, ","), "comma-separated tsnet tags")
+	fs.StringVar(&c.TSNet.Dir, "tsnet-dir", c.TSNet.Dir, "tsnet state directory")
+	fs.StringVar(&c.TSNet.Hostname, "tsnet-hostname", c.TSNet.Hostname, "tsnet hostname")
+	fs.StringVar(&c.TSNet.AuthKey, "tsnet-auth-key", c.TSNet.AuthKey, "tsnet auth key")
+	tags := fs.String("tsnet-tags", strings.Join(c.TSNet.Tags, ","), "comma-separated tsnet tags")
 	if err := fs.Parse(args[1:]); err != nil {
 		return command{}, err
 	}
@@ -189,9 +202,9 @@ func parseCommand(args []string) (command, error) {
 		}
 	}
 	if *tags == "" {
-		c.TSNetTags = nil
+		c.TSNet.Tags = nil
 	} else {
-		c.TSNetTags = strings.Split(*tags, ",")
+		c.TSNet.Tags = strings.Split(*tags, ",")
 	}
 	return command{Role: args[0], Transport: *mode, Config: c}, nil
 }
@@ -234,21 +247,21 @@ func gateways(nodeConfig domain.NodeConfig) (map[string]domain.Gateway, string, 
 }
 
 func newTSNet(c config) (*tsnet.Server, error) {
-	if c.TSNetDir == "" {
-		return nil, fmt.Errorf("tsnet_dir is required for userspace mode")
+	if c.TSNet.Dir == "" {
+		return nil, fmt.Errorf("tsnet.dir is required for userspace mode")
 	}
-	authKey := c.TSNetAuthKey
+	authKey := c.TSNet.AuthKey
 	if authKey == "" {
 		authKey = os.Getenv("TS_AUTHKEY")
 	}
-	advertiseTags := c.TSNetTags
+	advertiseTags := c.TSNet.Tags
 	if authKey != "" {
 		// Headscale (correctly) takes tags from a tagged preauth key and
 		// rejects a duplicate client-side request. This also prevents a local
 		// process setting tags beyond those granted by its enrollment key.
 		advertiseTags = nil
 	}
-	return &tsnet.Server{Dir: c.TSNetDir, Hostname: c.TSNetHostname, AuthKey: authKey, AdvertiseTags: advertiseTags}, nil
+	return &tsnet.Server{Dir: c.TSNet.Dir, Hostname: c.TSNet.Hostname, AuthKey: authKey, AdvertiseTags: advertiseTags}, nil
 }
 
 func runEgress(ctx context.Context, c config, transport string) {

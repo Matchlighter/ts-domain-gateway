@@ -30,7 +30,7 @@ per mapping every five minutes. Set `allocation_lease` in `config.json` (or
 PTR answers use a 10-minute DNS TTL.
 
 `-mode tsnet` runs an embedded userspace Tailscale node. It requires
-`tsnet_dir` and ordinarily a tagged pre-auth key on first enrollment.
+`tsnet.dir` and ordinarily a tagged pre-auth key on first enrollment.
 `-mode tailscaled` uses only the configured local tailscaled LocalAPI and host
 network stack. It never starts tsnet. Conversely, tsnet mode never falls back
 to tailscaled. Invalid mode values fail at startup. The old `-mode dns` and
@@ -55,7 +55,8 @@ Put long-lived settings in `config.json`; every field can be overridden on the
 command line using the matching hyphenated flag. `database` is always a
 database URL: use `sqlite://file/path` for a relative SQLite file,
 `sqlite:///absolute/path` for an absolute SQLite file, or `postgres://...` for
-PostgreSQL. `tsnet_dir` is `-tsnet-dir`.
+PostgreSQL. `tsnet.dir` is `-tsnet-dir`. The former top-level `tsnet_*` keys
+are rejected; move their values into the `tsnet` object.
 
 ```jsonc
 {
@@ -74,17 +75,19 @@ PostgreSQL. `tsnet_dir` is `-tsnet-dir`.
   // a PostgreSQL URL shared by every DNS replica.
   "database": "postgres://domain_gateway:secret@db.example:5432/domain_gateway?sslmode=require",
 
-  // Persistent tsnet state and identity. Required with -mode tsnet.
-  "tsnet_dir": "/var/lib/domain-gateway/tsnet",
-  "tsnet_hostname": "domain-dns",
+  "tsnet": {
+    // Persistent tsnet state and identity. dir is required with -mode tsnet.
+    "dir": "/var/lib/domain-gateway/tsnet",
+    "hostname": "domain-dns",
 
-  // First-enrollment key. Prefer TS_AUTHKEY in the service environment rather
-  // than committing a key here; it is unnecessary after tsnet state exists.
-  "tsnet_auth_key": "",
+    // First-enrollment key. Prefer TS_AUTHKEY in the service environment
+    // rather than committing a key here; it is unnecessary after state exists.
+    "auth_key": "",
 
-  // Tags requested only when no auth key is supplied. A tagged auth key owns
-  // tag assignment, so client-side tags are intentionally suppressed then.
-  "tsnet_tags": ["tag:dns"],
+    // Tags are requested only when no auth key is supplied. A tagged auth key
+    // owns tag assignment, so client-side tags are suppressed then.
+    "tags": ["tag:dns"]
+  },
 
   // Optional static data for the special *.tags DNS namespace, not gateway
   // authorization. Each address is a Tailscale node and tags are its labels.
