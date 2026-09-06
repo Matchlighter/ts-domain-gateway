@@ -23,13 +23,13 @@ import (
 )
 
 type config struct {
-	Listen           string      `json:"dns_listen"`
-	GatewayListen    string      `json:"gateway_listen"`
-	TailscaledSocket string      `json:"tailscaled_socket"`
-	Database         string      `json:"database"`
-	AllocationLease  string      `json:"allocation_lease"`
-	Egress            *egressConfig `json:"egress"`
-	TSNet            tsnetConfig `json:"tsnet"`
+	Listen           string        `json:"dns_listen"`
+	GatewayListen    string        `json:"gateway_listen"`
+	TailscaledSocket string        `json:"tailscaled_socket"`
+	Database         string        `json:"database"`
+	AllocationLease  string        `json:"allocation_lease"`
+	Egress           *egressConfig `json:"egress"`
+	TSNet            tsnetConfig   `json:"tsnet"`
 }
 
 // egressConfig is the local startup authority for one egress instance. It is
@@ -40,10 +40,11 @@ type egressConfig struct {
 }
 
 type tsnetConfig struct {
-	Dir      string   `json:"dir"`
-	Hostname string   `json:"hostname"`
-	AuthKey  string   `json:"auth_key"`
-	Tags     []string `json:"tags"`
+	Dir        string   `json:"dir"`
+	Hostname   string   `json:"hostname"`
+	AuthKey    string   `json:"auth_key"`
+	ControlURL string   `json:"control_url"`
+	Tags       []string `json:"tags"`
 }
 
 type command struct {
@@ -198,6 +199,7 @@ func parseCommand(args []string) (command, error) {
 	fs.StringVar(&c.TSNet.Dir, "tsnet-dir", c.TSNet.Dir, "tsnet state directory")
 	fs.StringVar(&c.TSNet.Hostname, "tsnet-hostname", c.TSNet.Hostname, "tsnet hostname")
 	fs.StringVar(&c.TSNet.AuthKey, "tsnet-auth-key", c.TSNet.AuthKey, "tsnet auth key")
+	fs.StringVar(&c.TSNet.ControlURL, "tsnet-control-url", c.TSNet.ControlURL, "tsnet coordination server URL")
 	tags := fs.String("tsnet-tags", strings.Join(c.TSNet.Tags, ","), "comma-separated tsnet tags")
 	if err := fs.Parse(args[1:]); err != nil {
 		return command{}, err
@@ -359,7 +361,7 @@ func newTSNet(c config) (*tsnet.Server, error) {
 		// process setting tags beyond those granted by its enrollment key.
 		advertiseTags = nil
 	}
-	return &tsnet.Server{Dir: c.TSNet.Dir, Hostname: c.TSNet.Hostname, AuthKey: authKey, AdvertiseTags: advertiseTags}, nil
+	return &tsnet.Server{Dir: c.TSNet.Dir, Hostname: c.TSNet.Hostname, AuthKey: authKey, ControlURL: c.TSNet.ControlURL, AdvertiseTags: advertiseTags}, nil
 }
 
 func runEgress(ctx context.Context, c config, transport string) {
@@ -414,7 +416,7 @@ func runEgress(ctx context.Context, c config, transport string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	s := &domain.Service{Identity: identity, Gateways: gs, PTRLookup: func(ctx context.Context, ip netip.Addr) ([]string, error) {
+	s := &domain.Service{Identity: identity, Gateways: gs, ResolverDial: server.Dial, PTRLookup: func(ctx context.Context, ip netip.Addr) ([]string, error) {
 		var last error
 		for _, dnsAddr := range dnsResolvers {
 			resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {

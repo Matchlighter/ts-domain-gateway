@@ -1,0 +1,53 @@
+name: domain-gateway-e2e
+services:
+  headscale:
+    build:
+      context: https://github.com/juanfont/headscale.git#refs/pull/3121/head
+      dockerfile_inline: |
+        FROM golang:1.27.0-trixie AS build
+        WORKDIR /src
+        COPY go.mod go.sum ./
+        RUN go mod download
+        COPY . .
+        RUN CGO_ENABLED=0 go build -trimpath -o /headscale ./cmd/headscale
+        FROM python:3.13-slim
+        COPY --from=build /headscale /usr/local/bin/headscale
+    command: [sh, /e2e/headscale-compose.sh]
+    volumes: [./compose-headscale.yaml:/etc/headscale/config.yaml:ro, ./compose-policy.hujson:/etc/headscale/policy.hujson:ro, ./headscale-compose.sh:/e2e/headscale-compose.sh:ro, auth:/auth]
+  upstream:
+    build: {context: ., dockerfile: Dockerfile.upstream}
+    command: [sh, -ec, 'mkdir -p /cert; openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=protected.example.test -keyout /cert/key.pem -out /cert/cert.pem -days 1 >/dev/null 2>&1; exec python /e2e/upstream.py']
+    volumes: [./upstream.py:/e2e/upstream.py:ro]
+    networks: {default: {}, e2e: {ipv4_address: 172.30.0.10}}
+  dns:
+    build: {context: .., dockerfile: e2e/Dockerfile}
+    command: [sh, -ec, 'until test -f /auth/ready; do sleep 1; done; export TS_AUTHKEY=$$(cat /auth/dns); exec domain-gateway dns -config /e2e/dns.json']
+    volumes: [auth:/auth, ./compose-dns.json:/e2e/dns.json:ro]
+    networks: [default, e2e]
+  gateway:
+    build: {context: .., dockerfile: e2e/Dockerfile}
+    command: [sh, -ec, 'until test -f /auth/ready; do sleep 1; done; export TS_AUTHKEY=$$(cat /auth/gateway1); exec domain-gateway egress -config /e2e/gateway.json']
+    volumes: [auth:/auth, ./compose-gateway.json:/e2e/gateway.json:ro]
+    networks: [default, e2e]
+  client:
+    build: {context: ., dockerfile: Dockerfile.client}
+    environment: [ROLE=client]
+    command: [python3, /e2e/test.py]
+    volumes: [auth:/auth, ./test.py:/e2e/test.py:ro]
+    depends_on: [dns, gateway]
+  denied:
+    build: {context: ., dockerfile: Dockerfile.client}
+    environment: [ROLE=denied]
+    command: [python3, /e2e/test.py]
+    volumes: [auth:/auth, ./test.py:/e2e/test.py:ro]
+    depends_on: [client]
+  gateway-dns:
+    build: {context: ., dockerfile: Dockerfile.client}
+    environment: [ROLE=gateway1]
+    command: [python3, /e2e/test.py]
+    volumes: [auth:/auth, ./test.py:/e2e/test.py:ro]
+    depends_on: [client]
+volumes: {auth: {}}
+networks:
+  e2e:
+    ipam: {config: [{subnet: 172.30.0.0/24}]}

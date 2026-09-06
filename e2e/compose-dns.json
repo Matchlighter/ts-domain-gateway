@@ -1,0 +1,1 @@
+{"database":"sqlite:///state/dns.db","tsnet":{"dir":"/state/dns","hostname":"e2e-dns","control_url":"http://headscale:8080"}}

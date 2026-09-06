@@ -18,6 +18,11 @@ type Identity interface {
 type GatewaySource interface {
 	IsGateway(context.Context, netip.Addr, map[string]Gateway) (bool, error)
 }
+
+// ResolverDial reaches the DNS resolver selected for an egress flow. tsnet
+// gateways use it to send resolver traffic through their userspace tailnet;
+// daemon-backed gateways leave it nil and use the host network.
+type ResolverDial func(context.Context, string, string) (net.Conn, error)
 type LocalAPI struct{ client *http.Client }
 
 func NewLocalAPI(socket string) *LocalAPI {
@@ -189,13 +194,14 @@ type Service struct {
 	StatePath       string
 	// PTRLookup resolves synthetic addresses through the DNS authority. It is
 	// overridden by tsnet gateways so lookup stays on the tailnet DNS path.
-	PTRLookup   func(context.Context, netip.Addr) ([]string, error)
-	Synthesized atomic.Uint64
-	Passthrough atomic.Uint64
-	Allowed     atomic.Uint64
-	Denied      atomic.Uint64
-	Lease       time.Duration
-	Now         func() time.Time
+	PTRLookup    func(context.Context, netip.Addr) ([]string, error)
+	ResolverDial ResolverDial
+	Synthesized  atomic.Uint64
+	Passthrough  atomic.Uint64
+	Allowed      atomic.Uint64
+	Denied       atomic.Uint64
+	Lease        time.Duration
+	Now          func() time.Time
 	// GatewayTopology is DNS's active route-discovery seam. It is consulted
 	// only for a new protected mapping; an existing lease remains answerable.
 	GatewayTopology func(context.Context) (map[string]Gateway, error)

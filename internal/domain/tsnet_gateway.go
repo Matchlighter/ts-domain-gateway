@@ -23,9 +23,6 @@ func (s *Service) ServeTSNetGateway(ctx context.Context, server *tsnet.Server) e
 	for _, gateway := range s.Gateways {
 		routes = append(routes, gateway.Prefixes...)
 	}
-	if _, err := client.EditPrefs(ctx, &ipn.MaskedPrefs{Prefs: ipn.Prefs{AdvertiseRoutes: routes}, AdvertiseRoutesSet: true}); err != nil {
-		return err
-	}
 	server.RegisterFallbackTCPHandler(func(src, dst netip.AddrPort) (func(net.Conn), bool) {
 		known := false
 		for _, gateway := range s.Gateways {
@@ -39,6 +36,11 @@ func (s *Service) ServeTSNetGateway(ctx context.Context, server *tsnet.Server) e
 		}
 		return func(conn net.Conn) { defer conn.Close(); s.ProxyTCP(ctx, conn, src, dst) }, true
 	})
+	// Install the receiver before publishing the routes. Otherwise the control
+	// plane can send a newly-routed SYN during startup while no fallback owns it.
+	if _, err := client.EditPrefs(ctx, &ipn.MaskedPrefs{Prefs: ipn.Prefs{AdvertiseRoutes: routes}, AdvertiseRoutesSet: true}); err != nil {
+		return err
+	}
 	<-ctx.Done()
 	return ctx.Err()
 }

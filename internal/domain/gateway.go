@@ -82,9 +82,13 @@ func (s *Service) ProxyTCP(ctx context.Context, client net.Conn, src, dst netip.
 	if !ok {
 		return
 	}
+	dial := s.ResolverDial
+	if dial == nil {
+		dialer := net.Dialer{}
+		dial = dialer.DialContext
+	}
 	resolver := net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-		d := net.Dialer{}
-		return d.DialContext(ctx, "udp", g.Resolver)
+		return dial(ctx, "udp", g.Resolver)
 	}}
 	ips, err := resolver.LookupNetIP(ctx, "ip", strings.TrimSuffix(names[0], "."))
 	if err != nil || len(ips) == 0 {

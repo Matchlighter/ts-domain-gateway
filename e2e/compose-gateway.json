@@ -1,0 +1,1 @@
+{"egress":{"tag":"tag:gateway1","ranges":["10.254.0.0/18"]},"tsnet":{"dir":"/state/gateway","hostname":"e2e-gateway","control_url":"http://headscale:8080"}}

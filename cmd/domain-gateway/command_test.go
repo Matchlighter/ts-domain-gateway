@@ -17,17 +17,17 @@ func (n taggedNodes) TaggedNodes(context.Context) ([]domain.TaggedNode, error) {
 
 func TestParseCommandSeparatesRoleTransportAndConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"tsnet":{"dir":"from-file","hostname":"from-file-host","auth_key":"from-file-key","tags":["tag:file"]},"database":"postgres://from-file","egress":{"tag":"tag:file","ranges":["10.254.0.0/18"]}}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"tsnet":{"dir":"from-file","hostname":"from-file-host","auth_key":"from-file-key","control_url":"https://headscale.example.test","tags":["tag:file"]},"database":"postgres://from-file","egress":{"tag":"tag:file","ranges":["10.254.0.0/18"]}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	cmd, err := parseCommand([]string{"egress", "-config", path, "-mode", "tailscaled", "-gateway-listen", "127.0.0.1:15001", "-tsnet-tags", "tag:one,tag:two"})
+	cmd, err := parseCommand([]string{"egress", "-config", path, "-mode", "tailscaled", "-gateway-listen", "127.0.0.1:15001", "-tsnet-control-url", "https://flag.example.test", "-tsnet-tags", "tag:one,tag:two"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cmd.Role != "egress" || cmd.Transport != "tailscaled" {
 		t.Fatalf("role/transport = %q/%q", cmd.Role, cmd.Transport)
 	}
-	if cmd.Config.GatewayListen != "127.0.0.1:15001" || len(cmd.Config.TSNet.Tags) != 2 || cmd.Config.TSNet.Dir != "from-file" || cmd.Config.TSNet.Hostname != "from-file-host" || cmd.Config.TSNet.AuthKey != "from-file-key" || cmd.Config.Database != "postgres://from-file" {
+	if cmd.Config.GatewayListen != "127.0.0.1:15001" || len(cmd.Config.TSNet.Tags) != 2 || cmd.Config.TSNet.Dir != "from-file" || cmd.Config.TSNet.Hostname != "from-file-host" || cmd.Config.TSNet.AuthKey != "from-file-key" || cmd.Config.TSNet.ControlURL != "https://flag.example.test" || cmd.Config.Database != "postgres://from-file" {
 		t.Fatalf("flags did not override and retain configuration: %+v", cmd.Config)
 	}
 }
@@ -54,15 +54,16 @@ func TestParseCommandRejectsLegacyTopLevelTSNetConfiguration(t *testing.T) {
 func TestNewTSNetUsesNestedConfiguration(t *testing.T) {
 	dir := t.TempDir()
 	server, err := newTSNet(config{TSNet: tsnetConfig{
-		Dir:      dir,
-		Hostname: "domain-dns",
-		AuthKey:  "tskey-auth-test",
-		Tags:     []string{"tag:dns"},
+		Dir:        dir,
+		Hostname:   "domain-dns",
+		AuthKey:    "tskey-auth-test",
+		ControlURL: "https://headscale.example.test",
+		Tags:       []string{"tag:dns"},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if server.Dir != dir || server.Hostname != "domain-dns" || server.AuthKey != "tskey-auth-test" || server.AdvertiseTags != nil {
+	if server.Dir != dir || server.Hostname != "domain-dns" || server.AuthKey != "tskey-auth-test" || server.ControlURL != "https://headscale.example.test" || server.AdvertiseTags != nil {
 		t.Fatalf("server = %+v", server)
 	}
 }

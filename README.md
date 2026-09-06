@@ -88,6 +88,10 @@ are rejected; move their values into the `tsnet` object.
     "dir": "/var/lib/domain-gateway/tsnet",
     "hostname": "domain-dns",
 
+    // Optional coordination server. Leave empty for Tailscale's default
+    // (or TS_CONTROL_URL); set it for a Headscale deployment.
+    "control_url": "https://headscale.example.com",
+
     // First-enrollment key. Prefer TS_AUTHKEY in the service environment
     // rather than committing a key here; it is unnecessary after state exists.
     "auth_key": "",
@@ -111,6 +115,33 @@ Typical host-daemon egress, with an explicit listener override:
 ```text
 domain-gateway egress -config /etc/domain-gateway/config.json -mode tailscaled -gateway-listen 0.0.0.0:15001
 ```
+
+`tsnet.control_url` may be overridden with `-tsnet-control-url`. It selects
+the Tailscale coordination server for tsnet mode (for example, a Headscale
+URL); it is ignored in tailscaled mode.
+
+## Local Docker E2E
+
+Run the complete live suite against a disposable Docker Headscale built from
+[Headscale PR #3121](https://github.com/juanfont/headscale/pull/3121):
+
+```text
+./e2e/run-compose.sh
+```
+
+The script requires Docker with the Compose plugin. It builds the project and
+the pinned Headscale image, then starts a DNS authority, egress gateway,
+deterministic upstream DNS/HTTP/HTTPS server, and isolated tagged clients. It
+waits for the tailnet to form, exercises the end-to-end checks, and removes
+all containers, networks, and volumes on exit. It makes no changes to the
+repository or a real tailnet.
+
+The suite uses the in-stack `protected.example.test` host rather than an
+Internet site. It verifies synthetic and ordinary DNS results, a denied client
+receiving the real address after an authorized client has allocated a
+synthetic address, PTR, TCP/HTTP, TLS/HTTPS, gateway-origin DNS passthrough,
+and automatic discovery of the gateway synthetic range. UDP remains an
+explicit expected-red probe because the gateway currently proxies TCP only.
 
 The database is DNS-only storage. The allocation table has unique
 gateway/domain and synthetic-IP keys. PostgreSQL is a shared allocation

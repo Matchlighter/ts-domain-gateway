@@ -49,10 +49,13 @@ func ConfigFromNodeAttrs(caps map[string]json.RawMessage) (NodeConfig, bool) {
 			return NodeConfig{}, false
 		}
 		result.UpstreamDNS = resolver
-		if result.Gateways == nil {
-			result.Gateways = map[string][]netip.Prefix{}
-		}
 		for tag, gateway := range config.Gateways {
+			if result.Gateways == nil {
+				// A nil map means no administrator override was supplied, so DNS
+				// must discover active gateway routes. Allocate it only once an
+				// actual gateway entry is encountered.
+				result.Gateways = map[string][]netip.Prefix{}
+			}
 			if tag == "" || len(gateway.Ranges) == 0 {
 				return NodeConfig{}, false
 			}
