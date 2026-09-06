@@ -1,9 +1,11 @@
 {
     "grants": [
         {
+            // Sources permitted to request the protected domains.
             "src": [
                 "group:whatever"
             ],
+            // The app config must be made available to both the DNS authority and selected egress tag.
             "dst": [
                 "tag:gateway1",
                 "tag:dns"
@@ -11,18 +13,24 @@
             "app": {
                 "matchlighter.net/cap/domain-gateway": [
                     {
+                        // Can be anything so long as it matches what's in the "gateways" configuration/nodeAttrs of the DNS server.
+                        // Best practice though is to set it to the tag your gateways are configured with.
                         "gateway": "tag:gateway1",
                         // Any and all requests to matched _domains_ (regardless of port) will be routed through the specified gateway
                         // The port value defines policy
                         // Think of it a equivalent to { src: ["group:whatever"], dst: [lookup(<domain>)], ip: [...] }
                         "resources": [
+                            "example.net:443,80", // Shorthand, TCP assumed
                             {
-                                "domain": "example.com"
+                                // Exact FQDN (or a one-label wildcard such as *.example.com).
+                                "domain": "example.com",
                             },
                             {
                                 "domain": "example.org",
-                                "ports": [
-                                    "tcp:443"
+                                // Omit ip for all ports; otherwise use tcp:N or udp:N.
+                                "ip": [
+                                    "tcp:443",
+                                    "udp:5000",
                                 ]
                             }
                         ]
@@ -31,6 +39,7 @@
             }
         },
         {
+            // DNS transport grant: clients need UDP 53 to the DNS tag.
             "src": [
                 "group:whatever"
             ],
@@ -42,11 +51,12 @@
             ]
         },
         {
+            // Route synthetic TCP destinations through the selected gateway tag.
             "src": [
                 "group:whatever"
             ],
             "dst": [
-                "net-gateway1"
+                "10.254.0.0/18"
             ],
             "ip": [
                 "tcp:443"
@@ -56,32 +66,21 @@
     ],
     "nodeAttrs": [
         {
+            // Make sure the DNS server is aware of the configured gateways and their synthetic IP ranges
             "target": [
-                "tag:dns"
+                "tag:dns",
             ],
             "app": {
                 "matchlighter.net/cap/domain-gateway-config": [{
+                    // system chooses a non-Tailscale /etc/resolv.conf resolver.
                     "upstreamDNS": "system",
-                    "gateways": [{
-                        "tag": "tag:gateway1",
-                        "prefix": "10.254.0.0/18",
-                    }],
+                    "gateways": {
+                        "tag:gateway1": {
+                            "range": ["10.254.0.0/18"]
+                        }
+                    },
                 }]
             }
         },
-        {
-            "target": [
-                "tag:gateway1"
-            ],
-            "app": {
-                "matchlighter.net/cap/domain-gateway-config": [{
-                    "upstreamDNS": "10.0.0.53:53",
-                    "gateways": [{
-                        "tag": "tag:gateway1",
-                        "prefix": "10.254.0.0/18",
-                    }],
-                }]
-            }
-        }
     ]
 }

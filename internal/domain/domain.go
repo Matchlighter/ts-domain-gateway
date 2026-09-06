@@ -196,3 +196,29 @@ func (a *Allocator) Lookup(ip netip.Addr) (Mapping, bool) {
 	m, ok := a.byIP[ip]
 	return m, ok
 }
+
+func (a *Allocator) LookupKey(gateway, domain string) (netip.Addr, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	ip, ok := a.byKey[gateway+"\x00"+domain]
+	return ip, ok
+}
+
+// Remember updates a local cache with an allocation established by the shared
+// registry. It never changes an existing mapping.
+func (a *Allocator) Remember(gateway, domain string, ip netip.Addr) {
+	key := gateway + "\x00" + domain
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.byKey[key]; ok {
+		return
+	}
+	if _, ok := a.byIP[ip]; ok {
+		return
+	}
+	a.byKey[key] = ip
+	a.byIP[ip] = Mapping{gateway, domain}
+	if next := ip.Next(); !a.next[gateway].IsValid() || a.next[gateway].Less(next) {
+		a.next[gateway] = next
+	}
+}

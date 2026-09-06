@@ -96,11 +96,39 @@ func (l *LocalAPI) NodeConfig(ctx context.Context) (NodeConfig, error) {
 	return NodeConfig{}, context.DeadlineExceeded
 }
 
+// TailscaleIP returns the first IPv4 address assigned to the host daemon.
+// DNS binds this address so it is reachable only through the selected
+// tailscaled transport rather than an arbitrary host interface.
+func (l *LocalAPI) TailscaleIP(ctx context.Context) (netip.Addr, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://local-tailscaled/localapi/v0/status", nil)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	res, err := l.client.Do(req)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	defer res.Body.Close()
+	var status struct{ TailscaleIPs []netip.Addr }
+	if res.StatusCode != http.StatusOK || json.NewDecoder(res.Body).Decode(&status) != nil {
+		return netip.Addr{}, context.DeadlineExceeded
+	}
+	for _, ip := range status.TailscaleIPs {
+		if ip.Is4() {
+			return ip, nil
+		}
+	}
+	return netip.Addr{}, context.DeadlineExceeded
+}
+
 type Service struct {
 	Identity    Identity
 	Gateways    map[string]Gateway
 	Allocations *Allocator
-	StatePath   string
+	// AllocationStore is owned only by the DNS role. Gateways are deliberately
+	// stateless and recover mappings through DNS PTR records.
+	AllocationStore AllocationStore
+	StatePath       string
 	// PTRLookup resolves synthetic addresses through the DNS authority. It is
 	// overridden by tsnet gateways so lookup stays on the tailnet DNS path.
 	PTRLookup   func(context.Context, netip.Addr) ([]string, error)
@@ -144,17 +172,36 @@ func (s *Service) DNS(ctx context.Context, source netip.Addr, name string) (neti
 		s.Passthrough.Add(1)
 		return netip.Addr{}, false
 	}
-	ip, err := s.Allocations.Allocate(gateway, s.Gateways[gateway].Prefix, name)
+	var ip netip.Addr
+	if s.AllocationStore != nil {
+		ip, err = s.AllocationStore.Allocate(ctx, s.Allocations, gateway, s.Gateways[gateway].Prefix, name)
+	} else {
+		ip, err = s.Allocations.Allocate(gateway, s.Gateways[gateway].Prefix, name)
+	}
 	if err != nil {
 		s.Passthrough.Add(1)
 		return netip.Addr{}, false
 	}
-	if s.StatePath != "" && s.Allocations.Save(s.StatePath) != nil {
+	// StatePath remains for callers using the original JSON file API.
+	if s.AllocationStore == nil && s.StatePath != "" && s.Allocations.Save(s.StatePath) != nil {
 		s.Passthrough.Add(1)
 		return netip.Addr{}, false
 	}
 	s.Synthesized.Add(1)
 	return ip, true
+}
+
+// PTRMapping resolves a synthetic address locally first, then through the
+// shared allocation authority so any DNS replica can answer a peer's PTR.
+func (s *Service) PTRMapping(ctx context.Context, ip netip.Addr) (Mapping, bool) {
+	if mapping, ok := s.Allocations.Lookup(ip); ok {
+		return mapping, true
+	}
+	if s.AllocationStore == nil {
+		return Mapping{}, false
+	}
+	mapping, ok, err := s.AllocationStore.Lookup(ctx, s.Allocations, ip)
+	return mapping, err == nil && ok
 }
 func (s *Service) Flow(ctx context.Context, source, destination netip.Addr, proto string, port uint16) (Mapping, Gateway, bool) {
 	m, ok := s.Allocations.Lookup(destination)

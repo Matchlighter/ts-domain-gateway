@@ -75,6 +75,75 @@ func TestServiceReauthorizesFlowsAndRestoresAllocations(t *testing.T) {
 	}
 }
 
+func TestSQLiteAllocationStoreRestoresAllocations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allocations.db")
+	store, err := OpenAllocationStore(context.Background(), "sqlite://"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	allocated := NewAllocator()
+	ip, err := allocated.Allocate("tag:home", netip.MustParsePrefix("10.254.0.0/29"), "app.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(context.Background(), allocated); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := NewAllocator()
+	if err := store.Load(context.Background(), reloaded); err != nil {
+		t.Fatal(err)
+	}
+	if mapping, ok := reloaded.Lookup(ip); !ok || mapping.Gateway != "tag:home" || mapping.Domain != "app.example.com" {
+		t.Fatalf("SQLite mapping = %#v, %v", mapping, ok)
+	}
+}
+
+func TestSQLiteAllocationStoreSharesDNSReplicaAllocations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allocations.db")
+	first, err := OpenAllocationStore(context.Background(), "sqlite://"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := OpenAllocationStore(context.Background(), "sqlite://"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	prefix := netip.MustParsePrefix("10.254.0.0/29")
+	firstCache, secondCache := NewAllocator(), NewAllocator()
+	firstIP, err := first.Allocate(context.Background(), firstCache, "tag:home", prefix, "app.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondIP, err := second.Allocate(context.Background(), secondCache, "tag:home", prefix, "app.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstIP != secondIP {
+		t.Fatalf("replicas allocated %s and %s for one domain", firstIP, secondIP)
+	}
+	otherIP, err := second.Allocate(context.Background(), NewAllocator(), "tag:home", prefix, "other.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherIP == firstIP {
+		t.Fatalf("replicas reused %s for distinct domains", firstIP)
+	}
+	thirdCache := NewAllocator()
+	mapping, found, err := second.Lookup(context.Background(), thirdCache, firstIP)
+	if err != nil || !found || mapping.Domain != "app.example.com" {
+		t.Fatalf("replica PTR lookup = %#v, %v, %v", mapping, found, err)
+	}
+}
+
+func TestAllocationStoreRejectsUnsupportedURL(t *testing.T) {
+	if _, err := OpenAllocationStore(context.Background(), "file:///tmp/allocations.db"); err == nil {
+		t.Fatal("unsupported database scheme was accepted")
+	}
+}
+
 func TestStatelessGatewayAuthorizesPTRDomain(t *testing.T) {
 	gateways := map[string]Gateway{"tag:home": {Prefix: netip.MustParsePrefix("10.254.0.0/29")}}
 	source := netip.MustParseAddr("100.64.0.2")

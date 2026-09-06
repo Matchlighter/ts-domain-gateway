@@ -1,1 +1,1 @@
-{"state_db":"/tmp/domain-gateway-dns.db","tsnet_dir":"/tmp/domain-gateway-dns","tsnet_hostname":"e2e-dns","tsnet_tags":["tag:dns"]}
+{"database":"sqlite:///tmp/domain-gateway-dns.db","tsnet_dir":"/tmp/domain-gateway-dns","tsnet_hostname":"e2e-dns","tsnet_tags":["tag:dns"]}

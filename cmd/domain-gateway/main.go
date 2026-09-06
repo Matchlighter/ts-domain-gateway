@@ -8,10 +8,12 @@ import (
 	"flag"
 	"fmt"
 	"github.com/matchlighter/headscale-domain-proxies/internal/domain"
+	"io"
 	"log"
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,7 +26,7 @@ type config struct {
 	Listen           string   `json:"dns_listen"`
 	GatewayListen    string   `json:"gateway_listen"`
 	TailscaledSocket string   `json:"tailscaled_socket"`
-	StateDB          string   `json:"state_db"`
+	Database         string   `json:"database"`
 	TSNetDir         string   `json:"tsnet_dir"`
 	TSNetHostname    string   `json:"tsnet_hostname"`
 	TSNetAuthKey     string   `json:"tsnet_auth_key"`
@@ -33,6 +35,12 @@ type config struct {
 		Address string   `json:"address"`
 		Tags    []string `json:"tags"`
 	}
+}
+
+type command struct {
+	Role      string
+	Transport string
+	Config    config
 }
 
 func question(b []byte) (string, int, int, bool) {
@@ -127,23 +135,78 @@ func ptrAnswer(req []byte, end int, name string) []byte {
 	return out
 }
 func main() {
-	path := flag.String("config", "config.json", "")
-	mode := flag.String("mode", "dns", "dns or gateway")
-	space := flag.String("space", "auto", "gateway dataplane: auto, kernel, or user")
-	flag.Parse()
-	data, err := os.ReadFile(*path)
+	cmd, err := parseCommand(os.Args[1:])
 	if err != nil {
 		log.Fatal(err)
 	}
-	var c config
-	if err = json.Unmarshal(data, &c); err != nil {
-		log.Fatal(err)
-	}
-	if *mode == "gateway" {
-		runGateway(context.Background(), c, *space)
+	if cmd.Role == "dns" {
+		runDNS(context.Background(), cmd.Config, cmd.Transport)
 		return
 	}
-	runDNS(context.Background(), c)
+	runEgress(context.Background(), cmd.Config, cmd.Transport)
+}
+
+func parseCommand(args []string) (command, error) {
+	if len(args) == 0 || (args[0] != "dns" && args[0] != "egress") {
+		return command{}, fmt.Errorf("usage: domain-gateway <dns|egress> [-mode tsnet|tailscaled] [-config path] [daemon flags]")
+	}
+	path, err := configPath(args[1:])
+	if err != nil {
+		return command{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return command{}, err
+	}
+	var c config
+	if err := json.Unmarshal(data, &c); err != nil {
+		return command{}, err
+	}
+	fs := flag.NewFlagSet("domain-gateway "+args[0], flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	mode := fs.String("mode", "tsnet", "transport: tsnet or tailscaled")
+	fs.String("config", path, "configuration file")
+	fs.StringVar(&c.Listen, "dns-listen", c.Listen, "DNS UDP listen address")
+	fs.StringVar(&c.GatewayListen, "gateway-listen", c.GatewayListen, "egress TCP listen address")
+	fs.StringVar(&c.TailscaledSocket, "tailscaled-socket", c.TailscaledSocket, "tailscaled LocalAPI socket")
+	fs.StringVar(&c.Database, "database", c.Database, "allocation database URL (sqlite:// or postgres://)")
+	fs.StringVar(&c.TSNetDir, "tsnet-dir", c.TSNetDir, "tsnet state directory")
+	fs.StringVar(&c.TSNetHostname, "tsnet-hostname", c.TSNetHostname, "tsnet hostname")
+	fs.StringVar(&c.TSNetAuthKey, "tsnet-auth-key", c.TSNetAuthKey, "tsnet auth key")
+	tags := fs.String("tsnet-tags", strings.Join(c.TSNetTags, ","), "comma-separated tsnet tags")
+	if err := fs.Parse(args[1:]); err != nil {
+		return command{}, err
+	}
+	if *mode != "tsnet" && *mode != "tailscaled" {
+		return command{}, fmt.Errorf("invalid -mode %q (want tsnet or tailscaled)", *mode)
+	}
+	if *tags == "" {
+		c.TSNetTags = nil
+	} else {
+		c.TSNetTags = strings.Split(*tags, ",")
+	}
+	return command{Role: args[0], Transport: *mode, Config: c}, nil
+}
+
+func configPath(args []string) (string, error) {
+	path := "config.json"
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-config" || args[i] == "--config" {
+			if i+1 == len(args) {
+				return "", fmt.Errorf("%s requires a path", args[i])
+			}
+			path = args[i+1]
+			i++
+			continue
+		}
+		if value, ok := strings.CutPrefix(args[i], "-config="); ok {
+			path = value
+		}
+		if value, ok := strings.CutPrefix(args[i], "--config="); ok {
+			path = value
+		}
+	}
+	return filepath.Clean(path), nil
 }
 
 func gateways(nodeConfig domain.NodeConfig) (map[string]domain.Gateway, string, error) {
@@ -184,16 +247,13 @@ func newTSNet(c config) (*tsnet.Server, error) {
 	return &tsnet.Server{Dir: c.TSNetDir, Hostname: c.TSNetHostname, AuthKey: authKey, AdvertiseTags: advertiseTags}, nil
 }
 
-func runGateway(ctx context.Context, c config, space string) {
-	if space != "auto" && space != "kernel" && space != "user" {
-		log.Fatalf("invalid --space %q (want auto, kernel, or user)", space)
-	}
-	api := domain.NewLocalAPI(c.TailscaledSocket)
-	nodeConfig, kernelErr := api.NodeConfig(ctx)
-	if space == "kernel" && kernelErr != nil {
-		log.Fatalf("--space=kernel requires a usable tailscaled LocalAPI: %v", kernelErr)
-	}
-	if space == "kernel" || (space == "auto" && kernelErr == nil) {
+func runEgress(ctx context.Context, c config, transport string) {
+	if transport == "tailscaled" {
+		api := domain.NewLocalAPI(c.TailscaledSocket)
+		nodeConfig, err := api.NodeConfig(ctx)
+		if err != nil {
+			log.Fatalf("-mode=tailscaled requires a usable tailscaled LocalAPI: %v", err)
+		}
 		gs, _, err := gateways(nodeConfig)
 		if err != nil {
 			log.Fatal(err)
@@ -204,46 +264,7 @@ func runGateway(ctx context.Context, c config, space string) {
 		}
 		return
 	}
-	server, err := newTSNet(c)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if _, err := server.Up(ctx); err != nil {
-		log.Fatal(err)
-	}
-	client, err := server.LocalClient()
-	if err != nil {
-		log.Fatal(err)
-	}
-	identity := domain.TSNetIdentity{Client: client}
-	nodeConfig, err = identity.NodeConfig(ctx)
-	if err != nil {
-		log.Fatal("missing or invalid domain-gateway NodeAttr: ", err)
-	}
-	gs, _, err := gateways(nodeConfig)
-	if err != nil {
-		log.Fatal(err)
-	}
-	dnsConfig, err := client.DNSConfig(ctx)
-	if err != nil || len(dnsConfig.Resolvers) == 0 || dnsConfig.Resolvers[0].Addr == "" {
-		log.Fatal("userspace gateway requires an advertised Tailscale DNS resolver")
-	}
-	dnsAddr := dnsConfig.Resolvers[0].Addr
-	if _, _, err := net.SplitHostPort(dnsAddr); err != nil {
-		dnsAddr = net.JoinHostPort(dnsAddr, "53")
-	}
-	resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return server.Dial(ctx, network, dnsAddr)
-	}}
-	s := &domain.Service{Identity: identity, Gateways: gs, PTRLookup: func(ctx context.Context, ip netip.Addr) ([]string, error) {
-		return resolver.LookupAddr(ctx, ip.String())
-	}}
-	if err := s.ServeTSNetGateway(ctx, server); err != nil && err != context.Canceled {
-		log.Fatal(err)
-	}
-}
-
-func runDNS(ctx context.Context, c config) {
+	// The selected tsnet transport never falls back to the host daemon.
 	server, err := newTSNet(c)
 	if err != nil {
 		log.Fatal(err)
@@ -260,17 +281,101 @@ func runDNS(ctx context.Context, c config) {
 	if err != nil {
 		log.Fatal("missing or invalid domain-gateway NodeAttr: ", err)
 	}
+	gs, _, err := gateways(nodeConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	dnsConfig, err := client.DNSConfig(ctx)
+	if err != nil || len(dnsConfig.Resolvers) == 0 {
+		log.Fatal("userspace gateway requires an advertised Tailscale DNS resolver")
+	}
+	dnsResolvers := make([]string, 0, len(dnsConfig.Resolvers))
+	for _, resolver := range dnsConfig.Resolvers {
+		if resolver.Addr == "" {
+			continue
+		}
+		addr := resolver.Addr
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			addr = net.JoinHostPort(addr, "53")
+		}
+		dnsResolvers = append(dnsResolvers, addr)
+	}
+	if len(dnsResolvers) == 0 {
+		log.Fatal("userspace gateway requires an advertised Tailscale DNS resolver")
+	}
+	s := &domain.Service{Identity: identity, Gateways: gs, PTRLookup: func(ctx context.Context, ip netip.Addr) ([]string, error) {
+		var last error
+		for _, dnsAddr := range dnsResolvers {
+			resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return server.Dial(ctx, network, dnsAddr)
+			}}
+			names, err := resolver.LookupAddr(ctx, ip.String())
+			if err == nil && len(names) != 0 {
+				return names, nil
+			}
+			last = err
+		}
+		return nil, last
+	}}
+	if err := s.ServeTSNetGateway(ctx, server); err != nil && err != context.Canceled {
+		log.Fatal(err)
+	}
+}
+
+func runDNS(ctx context.Context, c config, transport string) {
+	var identity domain.Identity
+	var nodeConfig domain.NodeConfig
+	var listen func() (net.PacketConn, error)
+	if transport == "tailscaled" {
+		api := domain.NewLocalAPI(c.TailscaledSocket)
+		var err error
+		nodeConfig, err = api.NodeConfig(ctx)
+		if err != nil {
+			log.Fatalf("-mode=tailscaled requires a usable tailscaled LocalAPI: %v", err)
+		}
+		ip, err := api.TailscaleIP(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
+		identity = api
+		listen = func() (net.PacketConn, error) { return net.ListenPacket("udp", dnsListenAddress(c.Listen, ip)) }
+	} else {
+		server, err := newTSNet(c)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if _, err := server.Up(ctx); err != nil {
+			log.Fatal(err)
+		}
+		client, err := server.LocalClient()
+		if err != nil {
+			log.Fatal(err)
+		}
+		id := domain.TSNetIdentity{Client: client}
+		identity = id
+		nodeConfig, err = id.NodeConfig(ctx)
+		if err != nil {
+			log.Fatal("missing or invalid domain-gateway NodeAttr: ", err)
+		}
+		ip4, _ := server.TailscaleIPs()
+		listen = func() (net.PacketConn, error) { return server.ListenPacket("udp", dnsListenAddress(c.Listen, ip4)) }
+	}
 	gs, upstream, err := gateways(nodeConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
 	alloc := domain.NewAllocator()
-	if c.StateDB != "" {
-		if err := alloc.Load(c.StateDB); err != nil {
+	store, closeStore, err := allocationStore(ctx, c)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer closeStore()
+	if store != nil {
+		if err := store.Load(ctx, alloc); err != nil {
 			log.Fatal(err)
 		}
 	}
-	s := &domain.Service{Identity: identity, Gateways: gs, Allocations: alloc, StatePath: c.StateDB}
+	s := &domain.Service{Identity: identity, Gateways: gs, Allocations: alloc, AllocationStore: store}
 	nodes := make([]domain.TaggedNode, 0, len(c.TaggedNodes))
 	for _, n := range c.TaggedNodes {
 		tags := map[string]struct{}{}
@@ -279,14 +384,31 @@ func runDNS(ctx context.Context, c config) {
 		}
 		nodes = append(nodes, domain.TaggedNode{Address: n.Address, Tags: tags})
 	}
-	ip4, _ := server.TailscaleIPs()
-	conn, err := server.ListenPacket("udp", net.JoinHostPort(ip4.String(), "53"))
+	conn, err := listen()
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer conn.Close()
 	upstreamAddr := mustAddr(upstream)
 	serveDNS(ctx, conn, s, nodes, upstreamAddr)
+}
+
+func dnsListenAddress(configured string, ip netip.Addr) string {
+	if configured != "" {
+		return configured
+	}
+	return net.JoinHostPort(ip.String(), "53")
+}
+
+func allocationStore(ctx context.Context, c config) (domain.AllocationStore, func(), error) {
+	if c.Database != "" {
+		store, err := domain.OpenAllocationStore(ctx, c.Database)
+		if err != nil {
+			return nil, func() {}, err
+		}
+		return store, func() { _ = store.Close() }, nil
+	}
+	return nil, func() {}, nil
 }
 
 func serveDNS(ctx context.Context, conn net.PacketConn, s *domain.Service, nodes []domain.TaggedNode, upstreamAddr *net.UDPAddr) {
@@ -308,7 +430,7 @@ func serveDNS(ctx context.Context, conn net.PacketConn, s *domain.Service, nodes
 			}
 			if typ == 12 {
 				if synthetic, reverse := ptrName(name); reverse {
-					if mapping, found := s.Allocations.Lookup(synthetic); found {
+					if mapping, found := s.PTRMapping(ctx, synthetic); found {
 						conn.WriteTo(ptrAnswer(b, end, mapping.Domain), src)
 					} else {
 						conn.WriteTo(answer(b, end, netip.Addr{}), src)
