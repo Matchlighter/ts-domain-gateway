@@ -126,6 +126,7 @@ They guys at Tailscale are _smart_ - they made a policy engine that is extensibl
   // Required only by the egress role. This local assignment drives flow
   // enforcement and tsnet route advertisement. In tailscaled mode, advertise
   // the same ranges with tailscaled and redirect their TCP traffic above.
+  // (Only include in the Egress config)
   "egress": {
     "ranges": ["10.254.0.0/18"],
 
