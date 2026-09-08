@@ -31,45 +31,51 @@ func NewLocalAPI(socket string) *LocalAPI {
 		return dialer.DialContext(ctx, "unix", socket)
 	}}}}
 }
-func (l *LocalAPI) Capabilities(ctx context.Context, source, destination netip.Addr) (map[string]json.RawMessage, error) {
+
+type localWhoIs struct {
+	CapMap map[string]json.RawMessage
+	Node   struct{ Tags []string }
+}
+
+func (l *LocalAPI) whoIs(ctx context.Context, source, destination netip.Addr) (localWhoIs, error) {
 	v := url.Values{"addr": {source.String()}}
 	if destination.IsValid() {
 		v.Set("dst_ip", destination.String())
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://local-tailscaled/localapi/v0/whois?"+v.Encode(), nil)
 	if err != nil {
-		return nil, err
+		return localWhoIs{}, err
 	}
 	res, err := l.client.Do(req)
 	if err != nil {
-		return nil, err
+		return localWhoIs{}, err
 	}
 	defer res.Body.Close()
-	if res.StatusCode != 200 {
-		return nil, &url.Error{Op: "whois", URL: req.URL.String(), Err: context.DeadlineExceeded}
+	if res.StatusCode != http.StatusOK {
+		return localWhoIs{}, &url.Error{Op: "whois", URL: req.URL.String(), Err: context.DeadlineExceeded}
 	}
-	var response struct{ CapMap map[string]json.RawMessage }
-	err = json.NewDecoder(res.Body).Decode(&response)
-	if err != nil || response.CapMap == nil {
+	var response localWhoIs
+	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
+		return localWhoIs{}, context.DeadlineExceeded
+	}
+	return response, nil
+}
+
+func (l *LocalAPI) Capabilities(ctx context.Context, source, destination netip.Addr) (map[string]json.RawMessage, error) {
+	response, err := l.whoIs(ctx, source, destination)
+	if err != nil {
+		return nil, err
+	}
+	if response.CapMap == nil {
 		return nil, context.DeadlineExceeded
 	}
 	return response.CapMap, nil
 }
 
 func (l *LocalAPI) IsGateway(ctx context.Context, source netip.Addr, gateways map[string]Gateway) (bool, error) {
-	v := url.Values{"addr": {source.String()}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://local-tailscaled/localapi/v0/whois?"+v.Encode(), nil)
+	response, err := l.whoIs(ctx, source, netip.Addr{})
 	if err != nil {
 		return false, err
-	}
-	res, err := l.client.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer res.Body.Close()
-	var response struct{ Node struct{ Tags []string } }
-	if res.StatusCode != 200 || json.NewDecoder(res.Body).Decode(&response) != nil {
-		return false, context.DeadlineExceeded
 	}
 	for _, tag := range response.Node.Tags {
 		if _, ok := gateways[tag]; ok {
@@ -79,22 +85,37 @@ func (l *LocalAPI) IsGateway(ctx context.Context, source netip.Addr, gateways ma
 	return false, nil
 }
 
-// NodeConfig reads this process's typed NodeAttrs from local tailscaled.
-func (l *LocalAPI) NodeConfig(ctx context.Context) (NodeConfig, error) {
+type localStatus struct {
+	Self         statusNode             `json:"Self"`
+	Peer         map[string]*statusNode `json:"Peer"`
+	TailscaleIPs []netip.Addr           `json:"TailscaleIPs"`
+}
+
+func (l *LocalAPI) status(ctx context.Context) (localStatus, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://local-tailscaled/localapi/v0/status", nil)
 	if err != nil {
-		return NodeConfig{}, err
+		return localStatus{}, err
 	}
 	res, err := l.client.Do(req)
 	if err != nil {
-		return NodeConfig{}, err
+		return localStatus{}, err
 	}
 	defer res.Body.Close()
-	var status struct {
-		Self struct{ CapMap map[string]json.RawMessage }
+	if res.StatusCode != http.StatusOK {
+		return localStatus{}, context.DeadlineExceeded
 	}
-	if res.StatusCode != 200 || json.NewDecoder(res.Body).Decode(&status) != nil {
-		return NodeConfig{}, context.DeadlineExceeded
+	var status localStatus
+	if err := json.NewDecoder(res.Body).Decode(&status); err != nil {
+		return localStatus{}, context.DeadlineExceeded
+	}
+	return status, nil
+}
+
+// NodeConfig reads this process's typed NodeAttrs from local tailscaled.
+func (l *LocalAPI) NodeConfig(ctx context.Context) (NodeConfig, error) {
+	status, err := l.status(ctx)
+	if err != nil {
+		return NodeConfig{}, err
 	}
 	if config, ok := ConfigFromNodeAttrs(status.Self.CapMap); ok {
 		return config, nil
@@ -106,18 +127,9 @@ func (l *LocalAPI) NodeConfig(ctx context.Context) (NodeConfig, error) {
 // DNS binds this address so it is reachable only through the selected
 // tailscaled transport rather than an arbitrary host interface.
 func (l *LocalAPI) TailscaleIP(ctx context.Context) (netip.Addr, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://local-tailscaled/localapi/v0/status", nil)
+	status, err := l.status(ctx)
 	if err != nil {
 		return netip.Addr{}, err
-	}
-	res, err := l.client.Do(req)
-	if err != nil {
-		return netip.Addr{}, err
-	}
-	defer res.Body.Close()
-	var status struct{ TailscaleIPs []netip.Addr }
-	if res.StatusCode != http.StatusOK || json.NewDecoder(res.Body).Decode(&status) != nil {
-		return netip.Addr{}, context.DeadlineExceeded
 	}
 	for _, ip := range status.TailscaleIPs {
 		if ip.Is4() {
@@ -130,26 +142,12 @@ func (l *LocalAPI) TailscaleIP(ctx context.Context) (netip.Addr, error) {
 // TaggedNodes reads the local daemon's current, control-plane-authoritative
 // tailnet status. Tag DNS deliberately does not participate in authorization.
 func (l *LocalAPI) TaggedNodes(ctx context.Context) ([]TaggedNode, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://local-tailscaled/localapi/v0/status", nil)
+	status, err := l.status(ctx)
 	if err != nil {
 		return nil, err
-	}
-	res, err := l.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	var status struct {
-		Self *statusNode            `json:"Self"`
-		Peer map[string]*statusNode `json:"Peer"`
-	}
-	if res.StatusCode != http.StatusOK || json.NewDecoder(res.Body).Decode(&status) != nil {
-		return nil, context.DeadlineExceeded
 	}
 	nodes := make([]statusNode, 0, len(status.Peer)+1)
-	if status.Self != nil {
-		nodes = append(nodes, *status.Self)
-	}
+	nodes = append(nodes, status.Self)
 	for _, node := range status.Peer {
 		if node != nil {
 			nodes = append(nodes, *node)
@@ -161,6 +159,7 @@ func (l *LocalAPI) TaggedNodes(ctx context.Context) ([]TaggedNode, error) {
 type statusNode struct {
 	TailscaleIPs []netip.Addr `json:"TailscaleIPs"`
 	Tags         []string     `json:"Tags"`
+	CapMap       map[string]json.RawMessage
 }
 
 func taggedNodes(nodes []statusNode) []TaggedNode {
