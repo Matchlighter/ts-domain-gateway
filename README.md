@@ -75,12 +75,26 @@ are rejected; move their values into the `tsnet` object.
   // a PostgreSQL URL shared by every DNS replica.
   "database": "postgres://domain_gateway:secret@db.example:5432/domain_gateway?sslmode=require",
 
+  // Optional egress fallback resolver. A gateway-visible NodeAttr upstreamDNS
+  // wins. "system" uses the host's non-Tailscale resolver.
+  "upstream_resolver": "system",
+
   // Required only by the egress role. This local assignment drives flow
   // enforcement and tsnet route advertisement. In tailscaled mode, advertise
   // the same ranges with tailscaled and redirect their TCP traffic above.
   "egress": {
     "tag": "tag:gateway1",
-    "ranges": ["10.254.0.0/18"]
+    "ranges": ["10.254.0.0/18"],
+
+    // Optional IP address of the internal DNS authority for synthetic-address
+    // PTR recovery. Port 53 is used; backend DNS follows capability, NodeAttr,
+    // and upstream_resolver precedence below.
+    "dns_resolver": "192.0.2.53",
+
+    // Backend resolver transport in tsnet mode: auto uses tailnet only when
+    // an active peer subnet route contains the appcap resolver IP; otherwise
+    // it uses the host network. Set tailnet or host to force that path.
+    "upstream_dns_interface": "auto"
   },
 
   "tsnet": {
@@ -162,13 +176,16 @@ administrator override, wins over discovery, and logs a warning on mismatch.
 The NodeAttr can target only `tag:dns`; egress instead requires the local
 `egress` assignment above and never reads this NodeAttr.
 
-The DNS node uses its configured resolver for ordinary forwarded names. An
-egress node uses its transport's resolver to resolve the real backend: the
-system resolver in tailscaled mode, or the advertised Tailnet resolver in
-tsnet mode. `system` selects
-the first non-Tailscale resolver in `/etc/resolv.conf`; `100.100.100.100` is
-ignored to avoid a DNS loop. The policy compiler/control plane must preserve
-the object-valued `app` payload in NodeCapMap.
+The DNS node returns a synthetic address only for a matching authorized domain;
+all other records are forwarded through its NodeAttr `upstreamDNS`, or the
+system resolver when it is unset. Egress uses `egress.dns_resolver` (or the
+configured Tailnet DNS resolvers) only to recover the synthetic destination by
+PTR. The backend lookup precedence is resource `upstreamDNS`, grant
+`upstreamDNS`, a gateway-visible NodeAttr `upstreamDNS`, then
+`upstream_resolver`, and finally `system`. `system` selects the first
+non-Tailscale resolver in `/etc/resolv.conf`; `100.100.100.100` is ignored to
+avoid a DNS loop. The policy compiler/control plane must preserve the
+object-valued `app` payload in NodeCapMap.
 
 An individual `matchlighter.net/cap/domain-gateway` grant may set
 `upstreamDNS` to a concrete `host:port` resolver endpoint. Its resources may
@@ -178,6 +195,14 @@ the capability is parsed and are used only for the matching authorized flow.
 `system`, a bare hostname, port zero, and malformed endpoints are rejected
 with the whole capability entry, so policy data cannot turn into an arbitrary
 outbound connection.
+
+In tsnet egress mode, the gateway accepts advertised tailnet subnet routes.
+For each backend DNS lookup other than `system`, `egress.upstream_dns_interface`
+defaults to `auto`: it uses the tsnet path only when an active peer
+`PrimaryRoutes` prefix contains that resolver IP or the resolver is in a
+Tailnet address reported by the control plane; otherwise it uses the host
+network. This accommodates Headscale custom IP prefixes. Set it to `tailnet`
+or `host` to force the DNS path, including PTR recovery.
 
 Tailnet transport grants must independently let clients reach both the DNS
 node on UDP 53 and the synthetic prefix through the appropriate gateway tag.

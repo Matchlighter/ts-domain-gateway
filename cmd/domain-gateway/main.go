@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/matchlighter/headscale-domain-proxies/internal/domain"
+	"github.com/tailscale/hujson"
 	"io"
 	"log"
 	"net"
@@ -19,6 +20,8 @@ import (
 	"sync"
 	"time"
 
+	"tailscale.com/ipn"
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 )
 
@@ -28,6 +31,7 @@ type config struct {
 	TailscaledSocket string        `json:"tailscaled_socket"`
 	Database         string        `json:"database"`
 	AllocationLease  string        `json:"allocation_lease"`
+	UpstreamResolver string        `json:"upstream_resolver"`
 	Egress           *egressConfig `json:"egress"`
 	TSNet            tsnetConfig   `json:"tsnet"`
 }
@@ -35,8 +39,10 @@ type config struct {
 // egressConfig is the local startup authority for one egress instance. It is
 // deliberately separate from the DNS NodeAttr, which observes active routes.
 type egressConfig struct {
-	Tag    string   `json:"tag"`
-	Ranges []string `json:"ranges"`
+	Tag                  string   `json:"tag"`
+	Ranges               []string `json:"ranges"`
+	DNSResolver          string   `json:"dns_resolver"`
+	UpstreamDNSInterface string   `json:"upstream_dns_interface"`
 }
 
 type tsnetConfig struct {
@@ -174,6 +180,10 @@ func parseCommand(args []string) (command, error) {
 	if err != nil {
 		return command{}, err
 	}
+	data, err = hujson.Standardize(data)
+	if err != nil {
+		return command{}, err
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return command{}, err
@@ -196,6 +206,7 @@ func parseCommand(args []string) (command, error) {
 	fs.StringVar(&c.TailscaledSocket, "tailscaled-socket", c.TailscaledSocket, "tailscaled LocalAPI socket")
 	fs.StringVar(&c.Database, "database", c.Database, "allocation database URL (sqlite:// or postgres://)")
 	fs.StringVar(&c.AllocationLease, "allocation-lease", c.AllocationLease, "synthetic allocation lease duration")
+	fs.StringVar(&c.UpstreamResolver, "upstream-resolver", c.UpstreamResolver, "egress fallback DNS resolver (host:port or system)")
 	fs.StringVar(&c.TSNet.Dir, "tsnet-dir", c.TSNet.Dir, "tsnet state directory")
 	fs.StringVar(&c.TSNet.Hostname, "tsnet-hostname", c.TSNet.Hostname, "tsnet hostname")
 	fs.StringVar(&c.TSNet.AuthKey, "tsnet-auth-key", c.TSNet.AuthKey, "tsnet auth key")
@@ -220,6 +231,15 @@ func parseCommand(args []string) (command, error) {
 		if _, err := egressGateways(c, ""); err != nil {
 			return command{}, err
 		}
+		if _, err := egressUpstreamDNSInterface(c); err != nil {
+			return command{}, err
+		}
+		if _, _, err := egressPTRResolver(c); err != nil {
+			return command{}, err
+		}
+		if _, err := configuredResolver(c.UpstreamResolver); err != nil {
+			return command{}, err
+		}
 	}
 	if *tags == "" {
 		c.TSNet.Tags = nil
@@ -229,7 +249,44 @@ func parseCommand(args []string) (command, error) {
 	return command{Role: args[0], Transport: *mode, Config: c}, nil
 }
 
-func egressGateways(c config, resolver string) (map[string]domain.Gateway, error) {
+// configuredResolver validates the local egress fallback. Capability
+// resolvers are validated separately because they must never select system.
+func configuredResolver(resolver string) (string, error) {
+	if resolver == "" || domain.IsSystemResolver(resolver) {
+		return resolver, nil
+	}
+	host, port, err := net.SplitHostPort(resolver)
+	if err != nil || host == "" || port == "" {
+		return "", fmt.Errorf("invalid upstream_resolver %q (want host:port or system)", resolver)
+	}
+	if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+		return "", fmt.Errorf("invalid upstream_resolver %q (want host:port or system)", resolver)
+	}
+	return resolver, nil
+}
+
+// egressBackendResolver applies the non-capability part of egress resolver
+// precedence. An explicitly visible gateway NodeAttr wins over the local
+// fallback; "system" always means the host's non-Tailscale resolver.
+func egressBackendResolver(c config, nodeConfig domain.NodeConfig) (string, bool, error) {
+	resolver := c.UpstreamResolver
+	if nodeConfig.HasUpstreamDNS {
+		resolver = nodeConfig.UpstreamDNS
+	}
+	if resolver == "" {
+		resolver = "system"
+	}
+	if _, err := configuredResolver(resolver); err != nil {
+		return "", false, err
+	}
+	if domain.IsSystemResolver(resolver) {
+		resolver, err := systemUpstream()
+		return resolver, true, err
+	}
+	return resolver, false, nil
+}
+
+func egressGateways(c config, resolver string, systemResolver ...bool) (map[string]domain.Gateway, error) {
 	if c.Egress == nil || c.Egress.Tag == "" || !strings.HasPrefix(c.Egress.Tag, "tag:") || len(c.Egress.Ranges) == 0 {
 		return nil, fmt.Errorf("egress requires egress.tag and at least one egress.ranges entry")
 	}
@@ -246,7 +303,130 @@ func egressGateways(c config, resolver string) (map[string]domain.Gateway, error
 		}
 		prefixes = append(prefixes, prefix)
 	}
-	return map[string]domain.Gateway{c.Egress.Tag: {Prefixes: prefixes, Resolver: resolver}}, nil
+	return map[string]domain.Gateway{c.Egress.Tag: {Prefixes: prefixes, Resolver: resolver, SystemResolver: len(systemResolver) != 0 && systemResolver[0]}}, nil
+}
+
+// egressUpstreamDNSInterface selects how tsnet reaches an appcap resolver.
+// "auto" follows an active peer subnet route when it contains the resolver IP
+// and otherwise uses the host network. The forced values are useful when both
+// paths exist or an operator needs a deterministic path.
+func egressUpstreamDNSInterface(c config) (string, error) {
+	value := "auto"
+	if c.Egress != nil && c.Egress.UpstreamDNSInterface != "" {
+		value = c.Egress.UpstreamDNSInterface
+	}
+	switch value {
+	case "auto", "tailnet", "host":
+		return value, nil
+	default:
+		return "", fmt.Errorf("invalid egress upstream_dns_interface %q (want auto, tailnet, or host)", value)
+	}
+}
+
+func prefixesContainResolver(prefixes []netip.Prefix, resolver string) bool {
+	host, _, err := net.SplitHostPort(resolver)
+	if err != nil {
+		return false
+	}
+	address, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	for _, prefix := range prefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+func peerRoutesContainResolver(status *ipnstate.Status, resolver string) bool {
+	if status == nil {
+		return false
+	}
+	for _, peer := range status.Peer {
+		if peer != nil && peer.PrimaryRoutes != nil && prefixesContainResolver(peer.PrimaryRoutes.AsSlice(), resolver) {
+			return true
+		}
+	}
+	return false
+}
+
+// tailnetResolver identifies a resolver from the control-plane's current
+// Tailnet membership instead of assuming Tailscale's default address ranges.
+// This supports Headscale deployments with custom IP prefixes.
+func tailnetResolver(status *ipnstate.Status, resolver string) bool {
+	if status == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(resolver)
+	if err != nil {
+		return false
+	}
+	address, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	if status.Self != nil {
+		for _, candidate := range status.Self.TailscaleIPs {
+			if candidate == address {
+				return true
+			}
+		}
+	}
+	for _, candidate := range status.TailscaleIPs {
+		if candidate == address {
+			return true
+		}
+	}
+	for _, peer := range status.Peer {
+		if peer == nil {
+			continue
+		}
+		for _, candidate := range peer.TailscaleIPs {
+			if candidate == address {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// autoUsesTailnet recognizes control-plane Tailnet node addresses and
+// peer-advertised subnets. Other resolvers deliberately remain host-routable.
+func autoUsesTailnet(status *ipnstate.Status, resolver string) bool {
+	return tailnetResolver(status, resolver) || peerRoutesContainResolver(status, resolver)
+}
+
+// egressPTRResolver returns the egress-local DNS authority used to recover a
+// synthetic address's domain. Backend resolution is selected from the appcap.
+func egressPTRResolver(c config) (string, bool, error) {
+	if c.Egress == nil || c.Egress.DNSResolver == "" {
+		return "", false, nil
+	}
+	ip, err := netip.ParseAddr(c.Egress.DNSResolver)
+	if err != nil {
+		return "", false, fmt.Errorf("invalid egress DNS resolver IP %q", c.Egress.DNSResolver)
+	}
+	return net.JoinHostPort(ip.String(), "53"), true, nil
+}
+
+// lookupPTR queries the synthetic-address authority using the configured
+// egress DNS path. Auto routing recognizes control-plane Tailnet members and
+// peer-advertised subnet routes.
+func lookupPTR(ctx context.Context, ip netip.Addr, resolvers []string, dial domain.ResolverDial) ([]string, error) {
+	var last error
+	for _, dnsAddr := range resolvers {
+		resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return dial(ctx, network, dnsAddr)
+		}}
+		names, err := resolver.LookupAddr(ctx, ip.String())
+		if err == nil && len(names) != 0 {
+			return names, nil
+		}
+		last = err
+	}
+	return nil, last
 }
 
 func configPath(args []string) (string, error) {
@@ -367,15 +547,30 @@ func newTSNet(c config) (*tsnet.Server, error) {
 func runEgress(ctx context.Context, c config, transport string) {
 	if transport == "tailscaled" {
 		api := domain.NewLocalAPI(c.TailscaledSocket)
-		resolver, err := systemUpstream()
+		nodeConfig, err := api.NodeConfig(ctx)
+		if err != nil {
+			log.Printf("domain-gateway: gateway NodeAttr unavailable: %v", err)
+		}
+		resolver, systemResolver, err := egressBackendResolver(c, nodeConfig)
 		if err != nil {
 			log.Fatal(err)
 		}
-		gs, err := egressGateways(c, resolver)
+		gs, err := egressGateways(c, resolver, systemResolver)
 		if err != nil {
 			log.Fatal(err)
 		}
 		s := &domain.Service{Identity: api, Gateways: gs}
+		if ptrResolver, configured, err := egressPTRResolver(c); err != nil {
+			log.Fatal(err)
+		} else if configured {
+			dialer := net.Dialer{}
+			s.PTRLookup = func(ctx context.Context, ip netip.Addr) ([]string, error) {
+				resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+					return dialer.DialContext(ctx, network, ptrResolver)
+				}}
+				return resolver.LookupAddr(ctx, ip.String())
+			}
+		}
 		if err := s.ServeTCP(ctx, c.GatewayListen); err != nil {
 			log.Fatal(err)
 		}
@@ -393,42 +588,69 @@ func runEgress(ctx context.Context, c config, transport string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	identity := domain.TSNetIdentity{Client: client}
-	dnsConfig, err := client.DNSConfig(ctx)
-	if err != nil || len(dnsConfig.Resolvers) == 0 {
-		log.Fatal("userspace gateway requires an advertised Tailscale DNS resolver")
+	if _, err := client.EditPrefs(ctx, &ipn.MaskedPrefs{Prefs: ipn.Prefs{RouteAll: true}, RouteAllSet: true}); err != nil {
+		log.Fatalf("userspace gateway cannot accept tailnet subnet routes: %v", err)
 	}
-	dnsResolvers := make([]string, 0, len(dnsConfig.Resolvers))
-	for _, resolver := range dnsConfig.Resolvers {
-		if resolver.Addr == "" {
-			continue
-		}
-		addr := resolver.Addr
-		if _, _, err := net.SplitHostPort(addr); err != nil {
-			addr = net.JoinHostPort(addr, "53")
-		}
-		dnsResolvers = append(dnsResolvers, addr)
-	}
-	if len(dnsResolvers) == 0 {
-		log.Fatal("userspace gateway requires an advertised Tailscale DNS resolver")
-	}
-	gs, err := egressGateways(c, dnsResolvers[0])
+	upstreamDNSInterface, err := egressUpstreamDNSInterface(c)
 	if err != nil {
 		log.Fatal(err)
 	}
-	s := &domain.Service{Identity: identity, Gateways: gs, ResolverDial: server.Dial, PTRLookup: func(ctx context.Context, ip netip.Addr) ([]string, error) {
-		var last error
-		for _, dnsAddr := range dnsResolvers {
-			resolver := &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				return server.Dial(ctx, network, dnsAddr)
-			}}
-			names, err := resolver.LookupAddr(ctx, ip.String())
-			if err == nil && len(names) != 0 {
-				return names, nil
-			}
-			last = err
+	hostDialer := net.Dialer{}
+	resolverDial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		switch upstreamDNSInterface {
+		case "tailnet":
+			return server.Dial(ctx, network, address)
+		case "host":
+			return hostDialer.DialContext(ctx, network, address)
 		}
-		return nil, last
+		status, err := client.Status(ctx)
+		if err == nil && autoUsesTailnet(status, address) {
+			return server.Dial(ctx, network, address)
+		}
+		return hostDialer.DialContext(ctx, network, address)
+	}
+	identity := domain.TSNetIdentity{Client: client}
+	nodeConfig, err := identity.NodeConfig(ctx)
+	if err != nil {
+		log.Printf("domain-gateway: gateway NodeAttr unavailable: %v", err)
+	}
+	backendResolver, systemResolver, err := egressBackendResolver(c, nodeConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ptrResolver, configured, err := egressPTRResolver(c)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var dnsResolvers []string
+	if configured {
+		dnsResolvers = []string{ptrResolver}
+	} else {
+		dnsConfig, err := client.DNSConfig(ctx)
+		if err != nil || len(dnsConfig.Resolvers) == 0 {
+			log.Fatal("userspace gateway requires egress.dns_resolver or an advertised Tailscale DNS resolver")
+		}
+		dnsResolvers = make([]string, 0, len(dnsConfig.Resolvers))
+		for _, resolver := range dnsConfig.Resolvers {
+			if resolver.Addr == "" {
+				continue
+			}
+			addr := resolver.Addr
+			if _, _, err := net.SplitHostPort(addr); err != nil {
+				addr = net.JoinHostPort(addr, "53")
+			}
+			dnsResolvers = append(dnsResolvers, addr)
+		}
+		if len(dnsResolvers) == 0 {
+			log.Fatal("userspace gateway requires egress.dns_resolver or an advertised Tailscale DNS resolver")
+		}
+	}
+	gs, err := egressGateways(c, backendResolver, systemResolver)
+	if err != nil {
+		log.Fatal(err)
+	}
+	s := &domain.Service{Identity: identity, Gateways: gs, ResolverDial: resolverDial, PTRLookup: func(ctx context.Context, ip netip.Addr) ([]string, error) {
+		return lookupPTR(ctx, ip, dnsResolvers, resolverDial)
 	}}
 	if err := s.ServeTSNetGateway(ctx, server); err != nil && err != context.Canceled {
 		log.Fatal(err)

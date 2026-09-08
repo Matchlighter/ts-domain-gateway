@@ -83,7 +83,7 @@ func (s *Service) ProxyTCP(ctx context.Context, client net.Conn, src, dst netip.
 		return
 	}
 	dial := s.ResolverDial
-	if dial == nil {
+	if g.SystemResolver || dial == nil {
 		dialer := net.Dialer{}
 		dial = dialer.DialContext
 	}

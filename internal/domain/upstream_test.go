@@ -22,7 +22,14 @@ func TestNodeAttrConfiguresTagKeyedMultiRangeGateway(t *testing.T) {
 
 func TestNodeAttrAllowsRouteDiscoveryWithoutGatewayOverride(t *testing.T) {
 	got, ok := ConfigFromNodeAttrs(map[string]json.RawMessage{NodeConfigCapability: json.RawMessage(`[{"upstreamDNS":"system"}]`)})
-	if !ok || got.UpstreamDNS != "system" || got.Gateways != nil {
+	if !ok || got.UpstreamDNS != "system" || !got.HasUpstreamDNS || got.Gateways != nil {
+		t.Fatalf("config = %#v, ok = %v", got, ok)
+	}
+}
+
+func TestMissingNodeAttrUsesSystemResolverAndRouteDiscovery(t *testing.T) {
+	got, ok := ConfigFromNodeAttrs(nil)
+	if !ok || got.UpstreamDNS != "system" || got.HasUpstreamDNS || got.Gateways != nil {
 		t.Fatalf("config = %#v, ok = %v", got, ok)
 	}
 }
@@ -85,6 +92,7 @@ func TestServiceAllocatesAndAuthorizesAcrossGatewayRanges(t *testing.T) {
 		}
 	}
 }
+
 func TestCapabilityRangeOverridesDNSGatewayTopology(t *testing.T) {
 	source := netip.MustParseAddr("100.64.0.2")
 	override := netip.MustParsePrefix("10.253.0.0/29")

@@ -11,16 +11,18 @@ import (
 const NodeConfigCapability = "matchlighter.net/cap/domain-gateway-config"
 
 type NodeConfig struct {
-	UpstreamDNS string `json:"upstreamDNS"`
-	Gateways    map[string][]netip.Prefix
+	UpstreamDNS    string `json:"upstreamDNS"`
+	HasUpstreamDNS bool   `json:"-"`
+	Gateways       map[string][]netip.Prefix
 }
 
-// ConfigFromNodeAttrs accepts typed objects. Values merge additively, but
+// ConfigFromNodeAttrs accepts typed objects. Without a NodeAttr DNS uses the
+// system resolver and discovers gateway routes. Values merge additively, but
 // conflicting resolver or prefix definitions fail closed.
 func ConfigFromNodeAttrs(caps map[string]json.RawMessage) (NodeConfig, bool) {
 	raw, ok := caps[NodeConfigCapability]
 	if !ok {
-		return NodeConfig{}, false
+		return NodeConfig{UpstreamDNS: "system"}, true
 	}
 	var values []json.RawMessage
 	if json.Unmarshal(raw, &values) != nil || len(values) == 0 {
@@ -49,6 +51,7 @@ func ConfigFromNodeAttrs(caps map[string]json.RawMessage) (NodeConfig, bool) {
 			return NodeConfig{}, false
 		}
 		result.UpstreamDNS = resolver
+		result.HasUpstreamDNS = true
 		for tag, gateway := range config.Gateways {
 			if result.Gateways == nil {
 				// A nil map means no administrator override was supplied, so DNS

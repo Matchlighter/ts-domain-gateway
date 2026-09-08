@@ -104,8 +104,9 @@ func (g *Grant) UnmarshalJSON(data []byte) error {
 }
 
 type Gateway struct {
-	Prefixes []netip.Prefix
-	Resolver string
+	Prefixes       []netip.Prefix
+	Resolver       string
+	SystemResolver bool // Resolver must use the host's non-Tailscale DNS path.
 }
 
 func validName(name string) bool {
