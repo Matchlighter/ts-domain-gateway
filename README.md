@@ -151,9 +151,12 @@ limited to a single DNS authority and is not an HA deployment.
 
 ## Headscale policy and routing
 
-Configure upstream resolution in the DNS NodeAttr application payload shown in
-[sample.jsonc](sample.jsonc). By default DNS discovers each tagged gateway
-cluster's active synthetic ranges from stable Tailnet Status `PrimaryRoutes`.
+Optionally configure upstream resolution in the DNS NodeAttr application
+payload shown in [sample.jsonc](sample.jsonc). A `range` on a
+`matchlighter.net/cap/domain-gateway` grant overrides the selected gateway's
+synthetic pool for DNS allocation. Without that override, DNS discovers each
+tagged gateway cluster's active synthetic ranges from stable Tailnet Status
+`PrimaryRoutes`.
 `gateways` in that NodeAttr is optional: when present it is an explicit
 administrator override, wins over discovery, and logs a warning on mismatch.
 The NodeAttr can target only `tag:dns`; egress instead requires the local

@@ -85,3 +85,36 @@ func TestServiceAllocatesAndAuthorizesAcrossGatewayRanges(t *testing.T) {
 		}
 	}
 }
+func TestCapabilityRangeOverridesDNSGatewayTopology(t *testing.T) {
+	source := netip.MustParseAddr("100.64.0.2")
+	override := netip.MustParsePrefix("10.253.0.0/29")
+	service := &Service{
+		Identity: fakeIdentity{source: {Capability: json.RawMessage(`[
+			{"gateway":"tag:home","range":["10.253.0.0/29"],"resources":[{"domain":"app.example.com"}]}
+		]`)}},
+		Gateways:    map[string]Gateway{},
+		Allocations: NewAllocator(),
+		GatewayTopology: func(context.Context) (map[string]Gateway, error) {
+			t.Fatal("capability range should not consult route discovery")
+			return nil, nil
+		},
+	}
+	ip, outcome := service.DNSAnswer(context.Background(), source, "app.example.com")
+	if outcome != DNSSynthesized || !override.Contains(ip) {
+		t.Fatalf("DNSAnswer = %s/%v, want allocation from %s", ip, outcome, override)
+	}
+}
+
+func TestConflictingCapabilityRangesFailClosed(t *testing.T) {
+	source := netip.MustParseAddr("100.64.0.2")
+	service := &Service{
+		Identity: fakeIdentity{source: {Capability: json.RawMessage(`[
+			{"gateway":"tag:home","range":["10.253.0.0/29"],"resources":[{"domain":"app.example.com"}]},
+			{"gateway":"tag:home","range":["10.252.0.0/29"],"resources":[{"domain":"app.example.com"}]}
+		]`)}},
+		Allocations: NewAllocator(),
+	}
+	if _, outcome := service.DNSAnswer(context.Background(), source, "app.example.com"); outcome != DNSPassthrough {
+		t.Fatalf("conflicting ranges outcome = %v, want passthrough", outcome)
+	}
+}

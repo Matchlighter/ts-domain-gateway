@@ -87,6 +87,23 @@ func TestMalformedPortFailsClosed(t *testing.T) {
 	}
 }
 
+func TestMalformedCapabilityRangesFailClosed(t *testing.T) {
+	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
+	for _, value := range []string{
+		`[]`, `["10.254.0.1/24"]`, `["2001:db8::/64"]`,
+		`["10.254.0.0/24","10.254.0.128/25"]`,
+	} {
+		t.Run(value, func(t *testing.T) {
+			grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
+				{"gateway":"tag:home","range":` + value + `,"resources":[{"domain":"app.example.com"}]}
+			]`)}, gateways)
+			if len(grants) != 0 {
+				t.Fatalf("malformed range %s produced a grant", value)
+			}
+		})
+	}
+}
+
 func TestResourceIPAuthorizesListedTCPAndUDPPorts(t *testing.T) {
 	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
 	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[

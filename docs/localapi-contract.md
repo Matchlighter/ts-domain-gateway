@@ -20,7 +20,7 @@ The service preserves the outer payload until the application schema parser
 validates it. A payload must be exactly:
 
 ```json
-{"gateway":"tag:home","resources":[{"domain":"example.com","ip":["tcp:443"]}]}
+{"gateway":"tag:home","range":["10.254.0.0/18"],"resources":[{"domain":"example.com","ip":["tcp:443"]}]}
 ```
 
 `CapMap` entries from all applicable grants are an additive union. A missing,
@@ -34,6 +34,12 @@ Resource domains are exact by default. `*.example.com` matches exactly one
 label below the suffix, while `**.example.com` matches one or more labels at
 any depth below it. Neither wildcard matches the bare apex `example.com`;
 malformed wildcard patterns grant no access.
+
+An optional capability-level `range` overrides the selected gateway's synthetic
+IPv4 pool for DNS allocation. It is an array of non-overlapping, canonical
+CIDRs. Invalid ranges, or conflicting ranges from matching capability entries,
+grant no synthetic DNS answer. Egress keeps its local range assignment as its
+flow-enforcement authority.
 
 The Go runtime does not cache authorization capabilities: every DNS decision
 and every new gateway flow obtains the source's current compiled CapMap from

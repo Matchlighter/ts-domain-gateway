@@ -66,7 +66,43 @@ type Grant struct {
 	Gateway     string     `json:"gateway"`
 	UpstreamDNS string     `json:"upstreamDNS"`
 	Resources   []Resource `json:"resources"`
+	Ranges      []netip.Prefix
 }
+
+func (g *Grant) UnmarshalJSON(data []byte) error {
+	var grant struct {
+		Gateway     string          `json:"gateway"`
+		UpstreamDNS string          `json:"upstreamDNS"`
+		Resources   []Resource      `json:"resources"`
+		Ranges      json.RawMessage `json:"range"`
+	}
+	if err := json.Unmarshal(data, &grant); err != nil {
+		return err
+	}
+	g.Gateway, g.UpstreamDNS, g.Resources = grant.Gateway, grant.UpstreamDNS, grant.Resources
+	if grant.Ranges == nil {
+		return nil
+	}
+	var values []string
+	if err := json.Unmarshal(grant.Ranges, &values); err != nil || len(values) == 0 {
+		return errors.New("invalid gateway range")
+	}
+	g.Ranges = make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() {
+			return errors.New("invalid gateway range")
+		}
+		for _, prior := range g.Ranges {
+			if prefix.Overlaps(prior) {
+				return errors.New("overlapping gateway range")
+			}
+		}
+		g.Ranges = append(g.Ranges, prefix)
+	}
+	return nil
+}
+
 type Gateway struct {
 	Prefixes []netip.Prefix
 	Resolver string
@@ -259,6 +295,45 @@ func Authorize(grants []Grant, gateway, name, proto string, port uint16) bool {
 		}
 	}
 	return false
+}
+
+// GatewayForName selects the gateway and any capability-level IP-pool
+// override for a protected domain. Conflicting matching assignments fail
+// closed; an unset range defers to discovered or NodeAttr topology.
+func GatewayForName(grants []Grant, name string) (string, []netip.Prefix, bool) {
+	var gateway string
+	var ranges []netip.Prefix
+	for _, grant := range grants {
+		for _, resource := range grant.Resources {
+			if !match(resource.Domain, name) {
+				continue
+			}
+			if gateway != "" && gateway != grant.Gateway {
+				return "", nil, false
+			}
+			gateway = grant.Gateway
+			if len(grant.Ranges) == 0 {
+				continue
+			}
+			if ranges != nil && !samePrefixSlice(ranges, grant.Ranges) {
+				return "", nil, false
+			}
+			ranges = grant.Ranges
+		}
+	}
+	return gateway, ranges, gateway != ""
+}
+
+func samePrefixSlice(a, b []netip.Prefix) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Allocator assigns monotonic addresses. Entries are never reused during a process;

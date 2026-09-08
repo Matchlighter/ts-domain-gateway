@@ -260,19 +260,8 @@ func (s *Service) DNSAnswer(ctx context.Context, source netip.Addr, name string)
 		grantGateways = nil
 	}
 	grants := Parse(caps, grantGateways)
-	gateway := ""
-	for _, g := range grants {
-		for _, r := range g.Resources {
-			if match(r.Domain, name) {
-				if gateway != "" && gateway != g.Gateway {
-					s.Passthrough.Add(1)
-					return netip.Addr{}, DNSPassthrough
-				}
-				gateway = g.Gateway
-			}
-		}
-	}
-	if gateway == "" {
+	gateway, rangeOverride, authorized := GatewayForName(grants, name)
+	if !authorized {
 		s.Passthrough.Add(1)
 		return netip.Addr{}, DNSPassthrough
 	}
@@ -289,7 +278,7 @@ func (s *Service) DNSAnswer(ctx context.Context, source netip.Addr, name string)
 		return ip, DNSSynthesized
 	}
 	gateways := s.Gateways
-	if s.GatewayTopology != nil {
+	if len(rangeOverride) == 0 && s.GatewayTopology != nil {
 		var err error
 		gateways, err = s.GatewayTopology(ctx)
 		if err != nil {
@@ -298,6 +287,10 @@ func (s *Service) DNSAnswer(ctx context.Context, source netip.Addr, name string)
 		}
 	}
 	gatewayConfig, found := gateways[gateway]
+	if len(rangeOverride) != 0 {
+		gatewayConfig.Prefixes = rangeOverride
+		found = true
+	}
 	if !found || len(gatewayConfig.Prefixes) == 0 {
 		s.Passthrough.Add(1)
 		return netip.Addr{}, DNSUnavailable
