@@ -202,7 +202,7 @@ func TestGatewayForUsesResourceResolverBeforeGrantResolverAndFallback(t *testing
 
 func TestMalformedPolicyResolverFailsClosed(t *testing.T) {
 	for _, policy := range []string{
-		`{"range":["10.254.0.0/29"],"upstreamDNS":"resolver.example.com","resources":[{"domain":"app.example.com"}]}`,
+		`{"range":["10.254.0.0/29"],"upstreamDNS":"resolver.example.com:0","resources":[{"domain":"app.example.com"}]}`,
 		`{"range":["10.254.0.0/29"],"resources":[{"domain":"app.example.com","upstreamDNS":"127.0.0.1:0"}]}`,
 	} {
 		t.Run(policy, func(t *testing.T) {
@@ -211,6 +211,17 @@ func TestMalformedPolicyResolverFailsClosed(t *testing.T) {
 				t.Fatalf("invalid resolver policy parsed as %#v", grants)
 			}
 		})
+	}
+}
+
+func TestPolicyResolverDefaultsDNSPort(t *testing.T) {
+	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
+		{"range":["10.254.0.0/29"],"upstreamDNS":"resolver.example.com","resources":[
+			{"domain":"app.example.com","upstreamDNS":"192.0.2.53"}
+		]}
+	]`)})
+	if len(grants) != 1 || grants[0].UpstreamDNS != "resolver.example.com:53" || grants[0].Resources[0].UpstreamDNS != "192.0.2.53:53" {
+		t.Fatalf("policy DNS endpoint normalization = %#v", grants)
 	}
 }
 

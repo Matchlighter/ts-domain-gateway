@@ -2,7 +2,6 @@ package domain
 
 import (
 	"encoding/json"
-	"net"
 	"strings"
 )
 
@@ -34,12 +33,9 @@ func ConfigFromNodeAttrs(caps map[string]json.RawMessage) (NodeConfig, bool) {
 		if json.Unmarshal(raw, &config) != nil || config.UpstreamDNS == "" || config.Gateways != nil {
 			return NodeConfig{}, false
 		}
-		resolver := config.UpstreamDNS
-		if resolver != "system" {
-			host, port, err := net.SplitHostPort(resolver)
-			if err != nil || host == "" || port == "" {
-				return NodeConfig{}, false
-			}
+		resolver, valid := normalizeResolver(config.UpstreamDNS)
+		if !valid {
+			return NodeConfig{}, false
 		}
 		if result.UpstreamDNS != "" && result.UpstreamDNS != resolver {
 			return NodeConfig{}, false

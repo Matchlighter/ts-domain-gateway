@@ -183,19 +183,28 @@ func validPorts(ports []string) bool {
 	return true
 }
 
-// validPolicyResolver accepts a concrete UDP resolver endpoint or the fixed
-// system sentinel. Policy must never turn an unvalidated string into an
-// outbound connection.
-func validPolicyResolver(resolver string) bool {
+// normalizeResolver accepts a concrete DNS endpoint with an optional port, or
+// the fixed system sentinel. It returns an address suitable for net.Dial so
+// policy must never turn an unvalidated string into an outbound connection.
+func normalizeResolver(resolver string) (string, bool) {
 	if IsSystemResolver(resolver) {
-		return true
+		return resolver, true
 	}
 	host, port, err := net.SplitHostPort(resolver)
-	if err != nil || host == "" {
-		return false
+	if err != nil {
+		if strings.Contains(resolver, ":") && net.ParseIP(resolver) == nil {
+			return "", false
+		}
+		return net.JoinHostPort(resolver, "53"), true
+	}
+	if host == "" {
+		return "", false
 	}
 	n, err := strconv.ParseUint(port, 10, 16)
-	return err == nil && n != 0
+	if err != nil || n == 0 {
+		return "", false
+	}
+	return net.JoinHostPort(host, port), true
 }
 
 // Parse validates each independent opaque capability; invalid entries cannot authorize.
@@ -216,7 +225,10 @@ func Parse(capmap map[string]json.RawMessage) []Grant {
 		if json.Unmarshal(entry, &g) != nil || len(g.Ranges) == 0 || len(g.Resources) == 0 {
 			continue
 		}
-		valid := g.UpstreamDNS == "" || validPolicyResolver(g.UpstreamDNS)
+		valid := true
+		if g.UpstreamDNS != "" {
+			g.UpstreamDNS, valid = normalizeResolver(g.UpstreamDNS)
+		}
 		for i := range g.Resources {
 			d := strings.ToLower(strings.TrimSuffix(g.Resources[i].Domain, "."))
 			if strings.HasPrefix(d, "**.") {
@@ -227,8 +239,12 @@ func Parse(capmap map[string]json.RawMessage) []Grant {
 				valid = valid && validName(d)
 			}
 			g.Resources[i].Domain = d
-			valid = valid && validPorts(g.Resources[i].IP) &&
-				(g.Resources[i].UpstreamDNS == "" || validPolicyResolver(g.Resources[i].UpstreamDNS))
+			valid = valid && validPorts(g.Resources[i].IP)
+			if g.Resources[i].UpstreamDNS != "" {
+				var resolverValid bool
+				g.Resources[i].UpstreamDNS, resolverValid = normalizeResolver(g.Resources[i].UpstreamDNS)
+				valid = valid && resolverValid
+			}
 		}
 		if valid {
 			grants = append(grants, g)

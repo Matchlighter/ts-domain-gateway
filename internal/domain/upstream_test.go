@@ -20,6 +20,13 @@ func TestNodeAttrAllowsRouteDiscoveryWithoutGatewayOverride(t *testing.T) {
 	}
 }
 
+func TestNodeAttrDefaultsDNSPort(t *testing.T) {
+	got, ok := ConfigFromNodeAttrs(map[string]json.RawMessage{NodeConfigCapability: json.RawMessage(`[{"upstreamDNS":"192.0.2.53"}]`)})
+	if !ok || got.UpstreamDNS != "192.0.2.53:53" {
+		t.Fatalf("config = %#v, ok = %v", got, ok)
+	}
+}
+
 func TestMissingNodeAttrUsesSystemResolverAndRouteDiscovery(t *testing.T) {
 	got, ok := ConfigFromNodeAttrs(nil)
 	if !ok || got.UpstreamDNS != "system" || got.HasUpstreamDNS {

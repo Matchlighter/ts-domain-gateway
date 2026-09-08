@@ -26,11 +26,11 @@ They guys at Tailscale are _smart_ - they made a policy engine that is extensibl
                 "matchlighter.net/domain-gateway": [
                     {
                         // Specify a range of Synthetic-IPs to which lookups should be mapped.
-                        // Should match the advertised subnet / `egress.ranges` of the Egress you want to use.
+                        // Must exactly match the subnet advertised by the egress instance's `egress.ranges`.
                         "range": ["10.254.0.0/18"],
 
                         // Optional resolver for every resource in this grant. It must be
-                        // a concrete host:port endpoint, or "system".
+                        // a concrete host[:port] endpoint (port defaults to 53), or "system".
                         "upstreamDNS": "9.9.9.9:53",
 
                         // Any and all requests to matched _domains_ (regardless of port) will be mapped to a Synthetic-IP in `range`.
@@ -114,26 +114,30 @@ They guys at Tailscale are _smart_ - they made a policy engine that is extensibl
   // "database": "postgres://domain_gateway:secret@db.example:5432/domain_gateway?sslmode=require",
   "database": "sqlite://./dgw.db",
 
-  // Optional egress fallback resolver. A gateway-visible NodeAttr upstreamDNS
+  // Optional egress fallback resolver (host[:port]; port defaults to 53). A gateway-visible NodeAttr upstreamDNS
   // wins. "system" uses the host's non-Tailscale resolver.
-  "upstream_resolver": "system",
+  "upstream_resolver": "system", // Defaults "system" on DNS, or to Tailscale's configured DNS on Egress
+
+  // Backend resolver transport in tsnet mode: auto uses tailnet only when
+  // an active peer subnet route contains the resolver IP; otherwise
+  // it uses the host network. Set tailnet or host to force that path.
+  "upstream_resolver_interface": "auto",
 
   // Required only by the egress role. This local assignment drives flow
   // enforcement and tsnet route advertisement. In tailscaled mode, advertise
   // the same ranges with tailscaled and redirect their TCP traffic above.
   "egress": {
-    "tag": "tag:gateway1",
     "ranges": ["10.254.0.0/18"],
 
-    // Optional IP address of the internal DNS authority for synthetic-address
-    // PTR recovery. Port 53 is used; backend DNS follows capability, NodeAttr,
+    // Optional IP address (optionally with port) of the internal DNS authority
+    // for synthetic-address PTR recovery. An omitted port defaults to 53; backend DNS follows capability, NodeAttr,
     // and upstream_resolver precedence below.
-    "dns_resolver": "192.0.2.53",
+    "ptr_resolver": "192.0.2.53",
 
     // Backend resolver transport in tsnet mode: auto uses tailnet only when
-    // an active peer subnet route contains the appcap resolver IP; otherwise
+    // an active peer subnet route contains the resolver IP; otherwise
     // it uses the host network. Set tailnet or host to force that path.
-    "upstream_dns_interface": "auto"
+    "ptr_resolver_interface": "auto"
   },
 
   "tsnet": {

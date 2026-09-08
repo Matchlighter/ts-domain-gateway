@@ -17,7 +17,7 @@ import (
 
 func TestParseCommandSeparatesRoleTransportAndConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"tsnet":{"dir":"from-file","hostname":"from-file-host","auth_key":"from-file-key","control_url":"https://headscale.example.test","tags":["tag:file"]},"database":"postgres://from-file","egress":{"ranges":["10.254.0.0/18"],"dns_resolver":"192.0.2.53"}}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"tsnet":{"dir":"from-file","hostname":"from-file-host","auth_key":"from-file-key","control_url":"https://headscale.example.test","tags":["tag:file"]},"database":"postgres://from-file","egress":{"ranges":["10.254.0.0/18"],"ptr_resolver":"192.0.2.53"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cmd, err := parseCommand([]string{"egress", "-config", path, "-mode", "tailscaled", "-gateway-listen", "127.0.0.1:15001", "-tsnet-control-url", "https://flag.example.test", "-tsnet-tags", "tag:one,tag:two"})
@@ -27,19 +27,24 @@ func TestParseCommandSeparatesRoleTransportAndConfig(t *testing.T) {
 	if cmd.Role != "egress" || cmd.Transport != "tailscaled" {
 		t.Fatalf("role/transport = %q/%q", cmd.Role, cmd.Transport)
 	}
-	if cmd.Config.GatewayListen != "127.0.0.1:15001" || len(cmd.Config.TSNet.Tags) != 2 || cmd.Config.TSNet.Dir != "from-file" || cmd.Config.TSNet.Hostname != "from-file-host" || cmd.Config.TSNet.AuthKey != "from-file-key" || cmd.Config.TSNet.ControlURL != "https://flag.example.test" || cmd.Config.Database != "postgres://from-file" || cmd.Config.Egress.DNSResolver != "192.0.2.53" {
+	if cmd.Config.GatewayListen != "127.0.0.1:15001" || len(cmd.Config.TSNet.Tags) != 2 || cmd.Config.TSNet.Dir != "from-file" || cmd.Config.TSNet.Hostname != "from-file-host" || cmd.Config.TSNet.AuthKey != "from-file-key" || cmd.Config.TSNet.ControlURL != "https://flag.example.test" || cmd.Config.Database != "postgres://from-file" || cmd.Config.Egress.PTRResolver != "192.0.2.53" {
 		t.Fatalf("flags did not override and retain configuration: %+v", cmd.Config)
 	}
 }
 
-func TestEgressDNSResolverOverridesPTRResolver(t *testing.T) {
-	c := config{Egress: &egressConfig{Ranges: []string{"10.254.0.0/18"}, DNSResolver: "192.0.2.53"}}
+func TestEgressPTRResolverUsesDocumentedConfiguration(t *testing.T) {
+	c := config{Egress: &egressConfig{Ranges: []string{"10.254.0.0/18"}, PTRResolver: "192.0.2.53"}}
 	resolver, configured, err := egressPTRResolver(c)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !configured || resolver != "192.0.2.53:53" {
 		t.Fatalf("PTR resolver = %q, configured = %v", resolver, configured)
+	}
+	c.Egress.PTRResolver = "192.0.2.53:5353"
+	resolver, configured, err = egressPTRResolver(c)
+	if err != nil || !configured || resolver != "192.0.2.53:5353" {
+		t.Fatalf("PTR resolver with port = %q, configured = %v, err = %v", resolver, configured, err)
 	}
 	gateways, err := egressGateways(c, "100.100.100.100:53")
 	if err != nil {
@@ -50,30 +55,36 @@ func TestEgressDNSResolverOverridesPTRResolver(t *testing.T) {
 	}
 }
 
-func TestEgressDNSResolverRejectsNonIP(t *testing.T) {
-	c := config{Egress: &egressConfig{Ranges: []string{"10.254.0.0/18"}, DNSResolver: "resolver.example.test"}}
-	if _, _, err := egressPTRResolver(c); err == nil {
-		t.Fatal("egress accepted a non-IP DNS resolver")
+func TestEgressPTRResolverRejectsNonIP(t *testing.T) {
+	for _, value := range []string{"resolver.example.test", "192.0.2.53:0", "192.0.2.53:invalid"} {
+		c := config{Egress: &egressConfig{Ranges: []string{"10.254.0.0/18"}, PTRResolver: value}}
+		if _, _, err := egressPTRResolver(c); err == nil {
+			t.Fatalf("egress accepted invalid PTR resolver %q", value)
+		}
 	}
 }
 
-func TestEgressUpstreamDNSInterface(t *testing.T) {
+func TestEgressResolverInterfaces(t *testing.T) {
 	base := config{Egress: &egressConfig{Ranges: []string{"10.254.0.0/18"}}}
-	if got, err := egressUpstreamDNSInterface(base); err != nil || got != "auto" {
+	if got, err := egressUpstreamResolverInterface(base); err != nil || got != "auto" {
 		t.Fatalf("default interface = %q, %v", got, err)
 	}
 	for _, value := range []string{"host", "tailnet"} {
-		base.Egress.UpstreamDNSInterface = value
-		if got, err := egressUpstreamDNSInterface(base); err != nil || got != value {
+		base.UpstreamResolverInterface = value
+		if got, err := egressUpstreamResolverInterface(base); err != nil || got != value {
 			t.Fatalf("interface %q = %q, %v", value, got, err)
 		}
 	}
-	base.Egress.UpstreamDNSInterface = "invalid"
-	if _, err := egressUpstreamDNSInterface(base); err == nil {
+	base.Egress.PTRResolverInterface = "tailnet"
+	if got, err := egressPTRResolverInterface(base); err != nil || got != "tailnet" {
+		t.Fatalf("PTR interface = %q, %v", got, err)
+	}
+	base.UpstreamResolverInterface = "invalid"
+	if _, err := egressUpstreamResolverInterface(base); err == nil {
 		t.Fatal("accepted invalid interface")
 	}
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"egress":{"ranges":["10.254.0.0/18"],"upstream_dns_interface":"invalid"}}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"egress":{"ranges":["10.254.0.0/18"],"ptr_resolver_interface":"invalid"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := parseCommand([]string{"egress", "-config", path}); err == nil {
@@ -93,10 +104,15 @@ func TestEgressBackendResolverPrecedence(t *testing.T) {
 	}
 }
 
-func TestEgressRejectsInvalidLocalUpstreamResolver(t *testing.T) {
-	c := config{Egress: &egressConfig{Ranges: []string{"10.254.0.0/18"}}, UpstreamResolver: "resolver.example.test"}
-	if _, err := configuredResolver(c.UpstreamResolver); err == nil {
-		t.Fatal("accepted a local resolver without a port")
+func TestConfiguredResolverDefaultsDNSPort(t *testing.T) {
+	for _, test := range []struct{ in, want string }{
+		{"resolver.example.test", "resolver.example.test:53"},
+		{"192.0.2.53", "192.0.2.53:53"},
+		{"192.0.2.53:5353", "192.0.2.53:5353"},
+	} {
+		if got, err := configuredResolver(test.in); err != nil || got != test.want {
+			t.Fatalf("configuredResolver(%q) = %q, %v; want %q", test.in, got, err, test.want)
+		}
 	}
 }
 
