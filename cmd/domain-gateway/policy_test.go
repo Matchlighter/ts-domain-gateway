@@ -5,19 +5,33 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/matchlighter/headscale-domain-proxies/internal/domain"
 	"github.com/tailscale/hujson"
 )
 
-func TestSampleUsesValuedNodeAttrAppPayload(t *testing.T) {
-	path := filepath.Join("..", "..", "sample.jsonc")
-	b, err := os.ReadFile(path)
+func readReadmePolicy(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	standard, err := hujson.Standardize(b)
+	const start = "### Policy\n```jsonc\n"
+	startAt := strings.Index(string(b), start)
+	if startAt < 0 {
+		t.Fatal("README policy block not found")
+	}
+	policy, _, ok := strings.Cut(string(b)[startAt+len(start):], "\n```")
+	if !ok {
+		t.Fatal("README policy block is not terminated")
+	}
+	return []byte(policy)
+}
+
+func TestReadmePolicyUsesValuedNodeAttrAppPayload(t *testing.T) {
+	standard, err := hujson.Standardize(readReadmePolicy(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,26 +44,21 @@ func TestSampleUsesValuedNodeAttrAppPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(policy.NodeAttrs) == 0 {
-		t.Fatal("sample has no NodeAttrs")
+		t.Fatal("README policy has no NodeAttrs")
 	}
 	for _, nodeAttr := range policy.NodeAttrs {
 		raw, ok := nodeAttr.App[domain.NodeConfigCapability]
 		if !ok {
-			t.Fatalf("NodeAttr must use app.%s for its valued payload", domain.NodeConfigCapability)
+			t.Fatalf("README NodeAttr must use app.%s for its valued payload", domain.NodeConfigCapability)
 		}
 		if _, ok := domain.ConfigFromNodeAttrs(map[string]json.RawMessage{domain.NodeConfigCapability: raw}); !ok {
-			t.Fatal("sample app payload is not a valid domain gateway configuration")
+			t.Fatal("README app payload is not a valid domain gateway configuration")
 		}
 	}
 }
 
-func TestSampleDomainGrantUsesIPPortPolicy(t *testing.T) {
-	path := filepath.Join("..", "..", "sample.jsonc")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	standard, err := hujson.Standardize(b)
+func TestReadmePolicyDomainGrantUsesIPPortPolicy(t *testing.T) {
+	standard, err := hujson.Standardize(readReadmePolicy(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,26 +70,22 @@ func TestSampleDomainGrantUsesIPPortPolicy(t *testing.T) {
 	if err := json.Unmarshal(standard, &policy); err != nil {
 		t.Fatal(err)
 	}
-	gateways := map[string]domain.Gateway{"tag:gateway1": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/18")}}}
+	prefixes := []netip.Prefix{netip.MustParsePrefix("10.254.0.0/18")}
 	for _, grant := range policy.Grants {
 		raw, ok := grant.App[domain.Capability]
 		if !ok {
 			continue
 		}
 		parsed := domain.Parse(map[string]json.RawMessage{domain.Capability: raw})
-		if !domain.Authorize(parsed, gateways["tag:gateway1"].Prefixes, "example.org", "udp", 5000) {
-			t.Fatal("sample ip entry did not authorize its UDP port")
+		if !domain.Authorize(parsed, prefixes, "example.org", "tcp", 443) {
+			t.Fatal("README ip entry did not authorize its TCP port")
 		}
-		if domain.Authorize(parsed, gateways["tag:gateway1"].Prefixes, "example.org", "tcp", 5000) {
-			t.Fatal("sample ip entry authorized an unlisted protocol")
-		}
-		gateway, ok := domain.GatewayFor(parsed, gateways["tag:gateway1"], "example.org", "udp", 5000)
-		if !ok || gateway.Resolver != "192.0.2.54:53" {
-			t.Fatalf("sample resource resolver = %#v, %v", gateway, ok)
+		if domain.Authorize(parsed, prefixes, "example.org", "udp", 443) {
+			t.Fatal("README ip entry authorized an unsupported protocol")
 		}
 		return
 	}
-	t.Fatal("sample has no domain gateway grant")
+	t.Fatal("README policy has no domain gateway grant")
 }
 
 func TestAuthKeyDoesNotAdvertiseTags(t *testing.T) {

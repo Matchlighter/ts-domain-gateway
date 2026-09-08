@@ -202,7 +202,6 @@ func TestGatewayForUsesResourceResolverBeforeGrantResolverAndFallback(t *testing
 
 func TestMalformedPolicyResolverFailsClosed(t *testing.T) {
 	for _, policy := range []string{
-		`{"range":["10.254.0.0/29"],"upstreamDNS":"system","resources":[{"domain":"app.example.com"}]}`,
 		`{"range":["10.254.0.0/29"],"upstreamDNS":"resolver.example.com","resources":[{"domain":"app.example.com"}]}`,
 		`{"range":["10.254.0.0/29"],"resources":[{"domain":"app.example.com","upstreamDNS":"127.0.0.1:0"}]}`,
 	} {
@@ -212,6 +211,33 @@ func TestMalformedPolicyResolverFailsClosed(t *testing.T) {
 				t.Fatalf("invalid resolver policy parsed as %#v", grants)
 			}
 		})
+	}
+}
+
+func TestGatewayForUsesSystemPolicyResolver(t *testing.T) {
+	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
+		{"range":["10.254.0.0/29"],"upstreamDNS":"system","resources":[{"domain":"app.example.com"}]}
+	]`)})
+	gateway, ok := GatewayFor(grants, Gateway{
+		Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")},
+		Resolver: "127.0.0.1:53",
+	}, "app.example.com", "tcp", 443)
+	if !ok || gateway.Resolver != "system" || !gateway.SystemResolver {
+		t.Fatalf("GatewayFor system policy = %#v, %v", gateway, ok)
+	}
+}
+
+func TestGatewayForPreservesSystemFallback(t *testing.T) {
+	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
+		{"range":["10.254.0.0/29"],"resources":[{"domain":"app.example.com"}]}
+	]`)})
+	gateway, ok := GatewayFor(grants, Gateway{
+		Prefixes:       []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")},
+		Resolver:       "192.0.2.53:53",
+		SystemResolver: true,
+	}, "app.example.com", "tcp", 443)
+	if !ok || gateway.Resolver != "192.0.2.53:53" || !gateway.SystemResolver {
+		t.Fatalf("GatewayFor system fallback = %#v, %v", gateway, ok)
 	}
 }
 

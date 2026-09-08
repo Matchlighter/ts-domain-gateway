@@ -5,3 +5,6 @@
 .beads-credential-key
 .beads/proxieddb/
 /e2e/full_logs.log
+
+/main
+/livetest

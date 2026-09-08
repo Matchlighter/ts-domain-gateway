@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"net/netip"
 	"net/http"
+	"net/netip"
 	"testing"
 )
 

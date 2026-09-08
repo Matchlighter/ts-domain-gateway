@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const Capability = "matchlighter.net/cap/domain-gateway"
+const Capability = "matchlighter.net/domain-gateway"
 
 type Port struct {
 	Protocol string
@@ -183,10 +183,13 @@ func validPorts(ports []string) bool {
 	return true
 }
 
-// validPolicyResolver accepts only a concrete UDP resolver endpoint. "system"
-// is a NodeAttr convenience, not a capability value: policy must never turn
-// an unvalidated string into an outbound connection.
+// validPolicyResolver accepts a concrete UDP resolver endpoint or the fixed
+// system sentinel. Policy must never turn an unvalidated string into an
+// outbound connection.
 func validPolicyResolver(resolver string) bool {
+	if IsSystemResolver(resolver) {
+		return true
+	}
 	host, port, err := net.SplitHostPort(resolver)
 	if err != nil || host == "" {
 		return false
@@ -239,6 +242,7 @@ func Parse(capmap map[string]json.RawMessage) []Grant {
 // NodeAttr resolver. Conflicting equally-specific policy choices fail closed.
 func GatewayFor(grants []Grant, gateway Gateway, name, proto string, port uint16) (Gateway, bool) {
 	resolver, priority := gateway.Resolver, 0
+	systemResolver := gateway.SystemResolver
 	matched := false
 	for _, grant := range grants {
 		if !samePrefixSlice(grant.Ranges, gateway.Prefixes) {
@@ -257,6 +261,9 @@ func GatewayFor(grants []Grant, gateway Gateway, name, proto string, port uint16
 			}
 			if !matched || candidatePriority > priority {
 				resolver, priority, matched = candidate, candidatePriority, true
+				if candidatePriority > 0 {
+					systemResolver = IsSystemResolver(candidate)
+				}
 				continue
 			}
 			if candidatePriority == priority && candidate != resolver {
@@ -269,6 +276,7 @@ func GatewayFor(grants []Grant, gateway Gateway, name, proto string, port uint16
 		return Gateway{}, false
 	}
 	gateway.Resolver = resolver
+	gateway.SystemResolver = systemResolver
 	return gateway, true
 }
 

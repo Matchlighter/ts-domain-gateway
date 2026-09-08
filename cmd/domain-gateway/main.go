@@ -559,7 +559,7 @@ func runEgress(ctx context.Context, c config, transport string) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		s := &domain.Service{Identity: api, Gateways: gs}
+		s := &domain.Service{Identity: api, Gateways: gs, SystemResolver: func(context.Context) (string, error) { return systemUpstream() }}
 		if ptrResolver, configured, err := egressPTRResolver(c); err != nil {
 			log.Fatal(err)
 		} else if configured {
@@ -649,7 +649,7 @@ func runEgress(ctx context.Context, c config, transport string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	s := &domain.Service{Identity: identity, Gateways: gs, ResolverDial: resolverDial, PTRLookup: func(ctx context.Context, ip netip.Addr) ([]string, error) {
+	s := &domain.Service{Identity: identity, Gateways: gs, ResolverDial: resolverDial, SystemResolver: func(context.Context) (string, error) { return systemUpstream() }, PTRLookup: func(ctx context.Context, ip netip.Addr) ([]string, error) {
 		return lookupPTR(ctx, ip, dnsResolvers, resolverDial)
 	}}
 	if err := s.ServeTSNetGateway(ctx, server); err != nil && err != context.Canceled {

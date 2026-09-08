@@ -196,12 +196,15 @@ type Service struct {
 	// overridden by tsnet gateways so lookup stays on the tailnet DNS path.
 	PTRLookup    func(context.Context, netip.Addr) ([]string, error)
 	ResolverDial ResolverDial
-	Synthesized  atomic.Uint64
-	Passthrough  atomic.Uint64
-	Allowed      atomic.Uint64
-	Denied       atomic.Uint64
-	Lease        time.Duration
-	Now          func() time.Time
+	// SystemResolver returns the host's safe resolver endpoint for a policy
+	// upstreamDNS value of "system".
+	SystemResolver func(context.Context) (string, error)
+	Synthesized    atomic.Uint64
+	Passthrough    atomic.Uint64
+	Allowed        atomic.Uint64
+	Denied         atomic.Uint64
+	Lease          time.Duration
+	Now            func() time.Time
 }
 
 type DNSOutcome uint8

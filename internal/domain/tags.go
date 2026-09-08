@@ -34,6 +34,7 @@ func DiscoverGatewayRoutes(nodes []TaggedNode) (map[string][]netip.Prefix, error
 			}
 			for _, prefix := range node.PrimaryRoutes {
 				if !prefix.IsValid() || !prefix.Addr().Is4() || prefix != prefix.Masked() {
+					// TODO Limit/scoped failure - don't fail the whole mapping
 					return nil, fmt.Errorf("invalid active route %q for %s", prefix, tag)
 				}
 				duplicate := false

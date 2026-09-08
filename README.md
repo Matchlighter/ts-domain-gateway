@@ -1,79 +1,118 @@
 # Headscale Domain Proxies
 
-`domain-gateway` provides identity-aware DNS and TCP egress for domain
-resources authorized by Headscale/Tailscale application capabilities. The DNS
-role returns stable synthetic IPv4 addresses only to authorized tailnet
-sources. The egress role reauthorizes every TCP flow and resolves its backend
-only through that gateway's segment resolver.
+`domain-gateway` (`dgw`) provides identity-aware DNS and TCP egress for domain
+resources authorized by Headscale/Tailscale application capabilities.
 
-The complete, commented Headscale policy is [sample.jsonc](sample.jsonc). It
-is the source of truth for capability grants and per-node gateway settings;
-adapt its tags, groups, domains, prefixes, and resolver addresses before use.
+It's is conceptually similar to Tailscale's "App Connectors" but operates with one major difference: App Connectors are largely IP-based - if two services share an IP, Tailscale can't distinguish them. `dgw` defers the IP-resolution so that aliased domains (eg served by your reverse proxy) can be treated and routed differently. `dgw` also lets you enforce policy on the domain - not just the IP.
 
-## Roles and transports
+## Configuration
+They guys at Tailscale are _smart_ - they made a policy engine that is extensible, fairly easy to use, and (importantly) fast to query. They made this level of simple/direct integration straightforward.
 
-Role and runtime are deliberately separate:
+### Policy
+```jsonc
+{
+    "grants": [
+        {
+            // Sources/Users permitted to request the protected domains
+            "src": [
+                "group:whatever"
+            ],
+            // Both DNS and egress need to see/receive the application grant
+            "dst": [
+                "tag:dgw-egress-1",
+                "tag:dgw-dns"
+            ],
+            "app": {
+                "matchlighter.net/domain-gateway": [
+                    {
+                        // Specify a range of Synthetic-IPs to which lookups should be mapped.
+                        // Should match the advertised subnet / `egress.ranges` of the Egress you want to use.
+                        "range": ["10.254.0.0/18"],
 
-```text
-domain-gateway dns    -mode tsnet|tailscaled [flags]
-domain-gateway egress -mode tsnet|tailscaled [flags]
+                        // Optional resolver for every resource in this grant. It must be
+                        // a concrete host:port endpoint, or "system".
+                        "upstreamDNS": "9.9.9.9:53",
+
+                        // Any and all requests to matched _domains_ (regardless of port) will be mapped to a Synthetic-IP in `range`.
+                        // Think of it a equivalent to { src: ["group:whatever"], dst: [lookup(<domain>)], ip: [...] }
+                        "resources": [
+                            "example.net:443,80", // Shorthand
+                            {
+                                // Exact FQDN (or a one-label wildcard such as *.example.com).
+                                "domain": "example.com",
+                            },
+                            {
+                                "domain": "example.org",
+                                // A resource resolver wins over the grant resolver above.
+                                "upstreamDNS": "192.0.2.54:53",
+                                // Omit ip for all ports; otherwise use tcp:N - UDP is not yet supported
+                                "ip": [
+                                    "tcp:443",
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            // Make sure your users (and the Egress) can perform DNS queries against
+            "src": [
+                "group:whatever",
+                "tag:dgw-egress"
+            ],
+            "dst": [ "tag:dgw-dns" ],
+            "ip": [ "udp:53" ]
+        },
+        {
+            // Make sure your users can communicate with the configured Synthetic IPs
+            "src": [
+                "group:whatever"
+            ],
+            "dst": [ "10.254.0.0/18" ],
+            // You can do a granular policy here as well, but the Egress will also enforce based on the domain-gateway policies
+            "ip": [ "*" ],
+            "via": "tag:dgw-egress-1"
+        }
+    ],
+    "nodeAttrs": [{
+            "target": [
+                "tag:dgw-dns",
+                "tag:dgw-egress",
+            ],
+            "app": {
+                "matchlighter.net/domain-gateway": [{
+                    // Set the default/fallback upsteam DNS server
+                    // "system" (the default) chooses a non-Tailscale /etc/resolv.conf resolver.
+                    // You _can_ change the `target` above to selectively apply this setting
+                    "upstreamDNS": "system",
+                }]
+            }
+        },
+    ]
+}
+
 ```
 
-`dns` is the sole allocation authority. It persists synthetic-address to
-domain mappings and answers PTR records. `egress` is stateless: it queries
-those PTR records and never reads the allocation database.
-
-Synthetic allocations have a 60-minute lease by default. Successful synthetic
-forward and PTR lookups renew it; database renewals are debounced to one write
-per mapping every five minutes. Set `allocation_lease` in `config.json` (or
-`-allocation-lease`) to a positive Go duration such as `90m`. Synthetic A and
-PTR answers use a 10-minute DNS TTL.
-
-`-mode tsnet` runs an embedded userspace Tailscale node. It requires
-`tsnet.dir` and ordinarily a tagged pre-auth key on first enrollment.
-`-mode tailscaled` uses only the configured local tailscaled LocalAPI and host
-network stack. It never starts tsnet. Conversely, tsnet mode never falls back
-to tailscaled. Invalid mode values fail at startup. The old `-mode dns` and
-`-mode gateway` role selector has been removed; use the explicit subcommands.
-
-For tailscaled egress on Linux, advertise the synthetic prefix with
-tailscaled, then redirect only TCP traffic for that prefix to the listener:
-
-```text
-iptables -t nat -A PREROUTING -d 10.254.0.0/18 -p tcp -j REDIRECT --to-ports 15001
-```
-
-Set `gateway_listen` to `0.0.0.0:15001`. The process uses
-`SO_ORIGINAL_DST`, so authorization sees the client-visible synthetic address
-and port, never its local redirect address. In tsnet egress mode the subnet
-router advertises its local egress-assignment prefixes and receives the original destination
-in its userspace fallback handler instead.
-
-## Daemon configuration
-
-Put long-lived settings in `config.json`; every field can be overridden on the
-command line using the matching hyphenated flag. `database` is always a
-database URL: use `sqlite://file/path` for a relative SQLite file,
-`sqlite:///absolute/path` for an absolute SQLite file, or `postgres://...` for
-PostgreSQL. `tsnet.dir` is `-tsnet-dir`. The former top-level `tsnet_*` keys
-are rejected; move their values into the `tsnet` object.
+### Daemon
 
 ```jsonc
 {
   // Optional explicit bind address for DNS. Empty binds UDP 53 on the chosen
   // Tailscale address, which is the usual and safest setting.
-  "dns_listen": "",
+  // "dns_listen": "",
 
   // Local listener for tailscaled egress transparent interception.
-  "gateway_listen": "0.0.0.0:15001",
+  // "gateway_listen": "0.0.0.0:15001",
 
   // Unix LocalAPI socket used only with -mode tailscaled.
-  "tailscaled_socket": "/var/run/tailscale/tailscaled.sock",
+  // "tailscaled_socket": "/var/run/tailscale/tailscaled.sock",
 
   // DNS allocation storage. SQLite and PostgreSQL use the same schema;
   // it is created automatically. SQLite is one authority only; DNS HA needs
   // a PostgreSQL URL shared by every DNS replica.
-  "database": "postgres://domain_gateway:secret@db.example:5432/domain_gateway?sslmode=require",
+  // "database": "postgres://domain_gateway:secret@db.example:5432/domain_gateway?sslmode=require",
+  "database": "sqlite://./dgw.db",
 
   // Optional egress fallback resolver. A gateway-visible NodeAttr upstreamDNS
   // wins. "system" uses the host's non-Tailscale resolver.
@@ -112,29 +151,51 @@ are rejected; move their values into the `tsnet` object.
 
     // Tags are requested only when no auth key is supplied. A tagged auth key
     // owns tag assignment, so client-side tags are suppressed then.
-    "tags": ["tag:dns"]
+    "tags": ["tag:..."]
   },
-
 }
 ```
 
-Typical DNS authority, embedded transport:
+## Running
 
-```text
-domain-gateway dns -config /etc/domain-gateway/config.json -mode tsnet
+Domain-Gateway is composed of two services: DNS and Gateway/Egress.
+
+### DNS
+DNS (obviously) handles DNS queries and handles mapping of domains to "Synthetic IPs" and vice-versa. DNS is stateful, requiring a SQLite or Postgres DB. It should be capable of HA if a Postgres DB is provided.
+
+```shell
+domain-gateway dns -config ./dns.json
 ```
 
-Typical host-daemon egress, with an explicit listener override:
+### Egress
+Egress receives traffic destined for a Synthetic IP, consults DNS to map it back to a domain, resolves the real IP, and forwards the connection. It is stateless (aside from the actual connections running through it) and should be HA-capable as well.
 
-```text
-domain-gateway egress -config /etc/domain-gateway/config.json -mode tailscaled -gateway-listen 0.0.0.0:15001
+```shell
+domain-gateway egress -config ./gw.json
 ```
 
-`tsnet.control_url` may be overridden with `-tsnet-control-url`. It selects
-the Tailscale coordination server for tsnet mode (for example, a Headscale
-URL); it is ignored in tailscaled mode.
+### Tailscale Modes
+Both services were designed to be uses with an embedded Tailscale implementation - not a separate `tailscaled` install. However, they are keyed to detect an existing Tailscaled scoket and use that instead of using the embedded `tsnet`. You can also explicitly state which mode to use.
 
-## Local Docker E2E
+`-mode tsnet` runs an embedded userspace Tailscale node. It requires `tsnet.dir` and ordinarily a tagged pre-auth key on first enrollment.
+`-mode tailscaled` uses only the configured local tailscaled LocalAPI and host network stack. It never starts tsnet. Conversely, tsnet mode never falls back to tailscaled. Invalid mode values fail at startup. More details below.
+
+For tailscaled _egress_ on Linux, advertise the synthetic prefix with
+tailscaled, then redirect only TCP traffic for that prefix to the listener:
+
+```text
+iptables -t nat -A PREROUTING -d 10.254.0.0/18 -p tcp -j REDIRECT --to-ports 15001
+```
+
+Set `gateway_listen` to `0.0.0.0:15001`. The process uses
+`SO_ORIGINAL_DST`, so authorization sees the client-visible synthetic address
+and port, never its local redirect address. In tsnet egress mode the subnet
+router advertises its local egress-assignment prefixes and receives the original destination
+in its userspace fallback handler instead.
+
+## Development
+
+### Local Docker E2E
 
 Run the complete live suite against a disposable Docker Headscale built from
 [Headscale PR #3121](https://github.com/juanfont/headscale/pull/3121):
@@ -162,67 +223,3 @@ gateway/domain and synthetic-IP keys. PostgreSQL is a shared allocation
 registry: multiple DNS replicas can use it concurrently, converge on one
 mapping, and answer PTR records allocated by another replica. SQLite is
 limited to a single DNS authority and is not an HA deployment.
-
-## Headscale policy and routing
-
-Optionally configure upstream resolution in the DNS NodeAttr application
-payload shown in [sample.jsonc](sample.jsonc). A `range` on a
-`matchlighter.net/cap/domain-gateway` grant is required. It is the synthetic
-pool DNS allocates from and must exactly match the local egress assignment that
-serves it. DNS discovers tagged gateway clusters' active synthetic ranges from
-stable Tailnet Status `PrimaryRoutes` only to identify gateway-originated
-queries.
-`gateways` in that NodeAttr is optional: when present it is an explicit
-administrator override, wins over discovery, and logs a warning on mismatch.
-The NodeAttr can target only `tag:dns`; egress instead requires the local
-`egress` assignment above and never reads this NodeAttr.
-
-The DNS node returns a synthetic address only for a matching authorized domain;
-all other records are forwarded through its NodeAttr `upstreamDNS`, or the
-system resolver when it is unset. Egress uses `egress.dns_resolver` (or the
-configured Tailnet DNS resolvers) only to recover the synthetic destination by
-PTR. The backend lookup precedence is resource `upstreamDNS`, grant
-`upstreamDNS`, a gateway-visible NodeAttr `upstreamDNS`, then
-`upstream_resolver`, and finally `system`. `system` selects the first
-non-Tailscale resolver in `/etc/resolv.conf`; `100.100.100.100` is ignored to
-avoid a DNS loop. The policy compiler/control plane must preserve the
-object-valued `app` payload in NodeCapMap.
-
-An individual `matchlighter.net/cap/domain-gateway` grant may set
-`upstreamDNS` to a concrete `host:port` resolver endpoint. Its resources may
-set `upstreamDNS` too; a resource value wins over the grant value, and either
-wins over the gateway's configured resolver. These values are validated while
-the capability is parsed and are used only for the matching authorized flow.
-`system`, a bare hostname, port zero, and malformed endpoints are rejected
-with the whole capability entry, so policy data cannot turn into an arbitrary
-outbound connection.
-
-In tsnet egress mode, the gateway accepts advertised tailnet subnet routes.
-For each backend DNS lookup other than `system`, `egress.upstream_dns_interface`
-defaults to `auto`: it uses the tsnet path only when an active peer
-`PrimaryRoutes` prefix contains that resolver IP or the resolver is in a
-Tailnet address reported by the control plane; otherwise it uses the host
-network. This accommodates Headscale custom IP prefixes. Set it to `tailnet`
-or `host` to force the DNS path, including PTR recovery.
-
-Tailnet transport grants must independently let clients reach both the DNS
-node on UDP 53 and the synthetic prefix through the appropriate gateway tag.
-Configure clients to send protected resource suffixes to the DNS node.
-Unauthorized resource queries and ordinary names are forwarded upstream;
-authorized AAAA queries receive NODATA so IPv6 cannot bypass the gateway.
-
-Every interchangeable HA egress member must use the same local egress
-assignment and have equivalent backend reachability. Never route a segment
-prefix to a gateway that reaches a different backend. Advertise the same
-synthetic prefix from each egress member so Tailscale can
-select an available subnet router. Advertise every DNS replica as a tailnet
-resolver; tsnet egress tries each advertised resolver for its PTR lookup. DNS
-replicas must share PostgreSQL. If a new protected mapping has no active
-discovered route, DNS returns `SERVFAIL` rather than forwarding the name
-upstream. Existing leased mappings remain answerable until their lease expires.
-
-Build and run the focused proof suite with:
-
-```text
-go test ./...
-```

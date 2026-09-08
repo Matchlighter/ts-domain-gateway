@@ -8,7 +8,7 @@ import (
 )
 
 // NodeConfigCapability is a NodeAttr (not a peer-grant capability).
-const NodeConfigCapability = "matchlighter.net/cap/domain-gateway-config"
+const NodeConfigCapability = "matchlighter.net/domain-gateway"
 
 type NodeConfig struct {
 	UpstreamDNS    string `json:"upstreamDNS"`

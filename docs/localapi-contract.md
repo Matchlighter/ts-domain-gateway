@@ -15,7 +15,7 @@ GET /localapi/v0/whois?addr=<source-tailnet-IP>
 DNS uses that request. Gateway flows add `dst_ip=<synthetic-IP>`, so current
 tailscaled releases return destination-scoped peer capabilities when available.
 The expected JSON object contains `CapMap`, whose value for
-`matchlighter.net/cap/domain-gateway` is an array of arbitrary JSON values.
+`matchlighter.net/domain-gateway` is an array of arbitrary JSON values.
 The service preserves the outer payload until the application schema parser
 validates it. A payload must be exactly:
 

@@ -10,7 +10,7 @@
       "src": ["tag:client"],
       "dst": ["tag:dns", "tag:gateway1"],
       "app": {
-        "matchlighter.net/cap/domain-gateway": [{
+        "matchlighter.net/domain-gateway": [{
           "range": ["10.254.0.0/18"],
           "resources": [{"domain": "example.com", "ip": ["tcp:80", "tcp:443"]}]
         }]
@@ -22,7 +22,7 @@
   "nodeAttrs": [
     {
       "target": ["tag:dns"],
-      "app": {"matchlighter.net/cap/domain-gateway-config": [{
+      "app": {"matchlighter.net/domain-gateway-config": [{
         "upstreamDNS": "system",
         "gateways": {"tag:gateway1": {"range": ["10.254.0.0/18"]}}
       }]}

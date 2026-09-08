@@ -32,7 +32,7 @@ Use a custom application capability namespace under a domain controlled by the p
 Example capability name:
 
 ```text
-matchlighter.net/cap/domain-gateway
+matchlighter.net/domain-gateway
 ```
 
 Illustrative grant:
@@ -47,7 +47,7 @@ Illustrative grant:
   ],
 
   "app": {
-    "matchlighter.net/cap/domain-gateway": [
+    "matchlighter.net/domain-gateway": [
       {
         "gateway": "tag:gateway1",
         "resources": [
@@ -82,7 +82,7 @@ src selectors
 The Domain Gateway project handles only the contents of:
 
 ```text
-matchlighter.net/cap/domain-gateway
+matchlighter.net/domain-gateway
 ```
 
 ---
@@ -153,7 +153,7 @@ Example:
   ],
 
   "app": {
-    "matchlighter.net/cap/domain-gateway": [
+    "matchlighter.net/domain-gateway": [
       {
         "gateway": "tag:gateway1",
         "resources": [
@@ -320,7 +320,7 @@ Example:
   "dst": ["tag:dns", "tag:gateway1"],
 
   "app": {
-    "matchlighter.net/cap/domain-gateway": [
+    "matchlighter.net/domain-gateway": [
       {
         "gateway": "tag:gateway1",
         "resources": [
@@ -339,7 +339,7 @@ Example:
   "dst": ["tag:dns", "tag:gateway1"],
 
   "app": {
-    "matchlighter.net/cap/domain-gateway": [
+    "matchlighter.net/domain-gateway": [
       {
         "gateway": "tag:gateway1",
         "resources": [
@@ -405,7 +405,7 @@ The important object is the capability map.
 The application extracts:
 
 ```text
-matchlighter.net/cap/domain-gateway
+matchlighter.net/domain-gateway
 ```
 
 and evaluates the resulting capability objects.
@@ -494,7 +494,7 @@ tailscaled LocalAPI WhoIs
 CapMap
     |
     v
-matchlighter.net/cap/domain-gateway
+matchlighter.net/domain-gateway
     |
     v
 find matching resource
@@ -552,7 +552,7 @@ tailscaled LocalAPI WhoIs
 CapMap
     |
     v
-matchlighter.net/cap/domain-gateway
+matchlighter.net/domain-gateway
 
 evaluate:
     gateway matches tag:gateway1
@@ -781,7 +781,7 @@ Illustrative configuration:
       ],
 
       "app": {
-        "matchlighter.net/cap/domain-gateway": [
+        "matchlighter.net/domain-gateway": [
           {
             "gateway": "tag:gateway1",
 
