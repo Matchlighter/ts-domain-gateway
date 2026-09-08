@@ -38,7 +38,7 @@ They guys at Tailscale are _smart_ - they made a policy engine that is extensibl
                         "resources": [
                             "example.net:443,80", // Shorthand
                             {
-                                // Exact FQDN (or a one-label wildcard such as *.example.com).
+                                // Exact FQDN (a one-label wildcard such as *.example.com, or a multi-level wildcard like **.example.com).
                                 "domain": "example.com",
                             },
                             {
@@ -75,6 +75,7 @@ They guys at Tailscale are _smart_ - they made a policy engine that is extensibl
             "via": "tag:dgw-egress-1"
         }
     ],
+    // Not required - everything herein can be set elsewhere too.
     "nodeAttrs": [{
             "target": [
                 "tag:dgw-dns",
