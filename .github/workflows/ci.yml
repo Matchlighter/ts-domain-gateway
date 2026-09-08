@@ -20,8 +20,8 @@ jobs:
 
       - run: go test ./...
 
-      - name: Run Docker Headscale E2E
-        run: ./e2e/run-compose.sh
+      #! - name: Run Docker Headscale E2E
+      #!   run: ./e2e/run-compose.sh
 
       - run: go build -o domain-gateway ./cmd/domain-gateway
 

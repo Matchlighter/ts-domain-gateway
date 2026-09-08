@@ -1,0 +1,5 @@
+{
+  "upstream_resolver": "172.30.0.10:5353",
+  "egress": {"tag": "tag:gateway1", "ranges": ["10.254.0.0/18"], "upstream_dns_interface": "host"},
+  "tsnet": {"dir": "/state/gateway", "hostname": "e2e-gateway", "control_url": "http://headscale:8080"}
+}

@@ -8,3 +8,5 @@
 
 /main
 /livetest
+
+__pycache__/

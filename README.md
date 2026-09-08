@@ -201,7 +201,7 @@ Run the complete live suite against a disposable Docker Headscale built from
 [Headscale PR #3121](https://github.com/juanfont/headscale/pull/3121):
 
 ```text
-./e2e/run-compose.sh
+python3 e2e2/test.py
 ```
 
 The script requires Docker with the Compose plugin. It builds the project and
