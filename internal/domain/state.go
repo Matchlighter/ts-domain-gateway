@@ -31,6 +31,56 @@ type AllocationStore interface {
 	Lookup(context.Context, *Allocator, netip.Addr, time.Time, time.Duration) (Mapping, bool, error)
 }
 
+// AllocationLifecycle owns cache, durable-store, and legacy file-backed
+// allocation behavior. Service asks it only for synthetic mappings.
+type AllocationLifecycle struct {
+	Allocator *Allocator
+	Store     AllocationStore
+	StatePath string
+	Lease     time.Duration
+	Now       func() time.Time
+}
+
+func (l AllocationLifecycle) now() time.Time {
+	if l.Now != nil {
+		return l.Now()
+	}
+	return time.Now()
+}
+
+func (l AllocationLifecycle) lease() time.Duration {
+	if l.Lease > 0 {
+		return l.Lease
+	}
+	return time.Hour
+}
+
+func (l AllocationLifecycle) Allocate(ctx context.Context, gateway string, ranges []netip.Prefix, domain string) (netip.Addr, error) {
+	now, lease := l.now(), l.lease()
+	if l.Store != nil {
+		if ip, found, err := l.Store.LookupKey(ctx, l.Allocator, gateway, domain, now, lease); err != nil || found {
+			return ip, err
+		}
+		return l.Store.Allocate(ctx, l.Allocator, gateway, ranges, domain, now, lease)
+	}
+	if ip, found := l.Allocator.LookupKeyLive(gateway, domain, now); found {
+		return ip, nil
+	}
+	ip, err := l.Allocator.Allocate(gateway, ranges, domain)
+	if err == nil && l.StatePath != "" {
+		err = l.Allocator.Save(l.StatePath)
+	}
+	return ip, err
+}
+
+func (l AllocationLifecycle) Lookup(ctx context.Context, ip netip.Addr) (Mapping, bool) {
+	if l.Store == nil {
+		return l.Allocator.Lookup(ip)
+	}
+	mapping, ok, err := l.Store.Lookup(ctx, l.Allocator, ip, l.now(), l.lease())
+	return mapping, err == nil && ok
+}
+
 // SQLStore persists allocations in either SQLite or PostgreSQL. It can be
 // shared by DNS restarts, but there must still be one active DNS authority.
 type SQLStore struct {

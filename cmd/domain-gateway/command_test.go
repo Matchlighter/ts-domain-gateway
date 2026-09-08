@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"github.com/matchlighter/headscale-domain-proxies/internal/domain"
 	"net"
@@ -167,15 +166,6 @@ func TestParseCommandAcceptsHuJSON(t *testing.T) {
 	}
 	if cmd.Config.TSNet.Dir != "from-file" {
 		t.Fatalf("tsnet.dir = %q", cmd.Config.TSNet.Dir)
-	}
-}
-
-func TestServerFailureSetsSERVFAIL(t *testing.T) {
-	request := make([]byte, 17)
-	binary.BigEndian.PutUint16(request[4:6], 1)
-	response := serverFailure(request, 17)
-	if got := binary.BigEndian.Uint16(response[2:4]) & 15; got != 2 {
-		t.Fatalf("rcode = %d, want SERVFAIL", got)
 	}
 }
 

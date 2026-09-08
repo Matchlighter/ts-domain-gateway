@@ -3,10 +3,10 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/matchlighter/headscale-domain-proxies/internal/dnsudp"
 	"github.com/matchlighter/headscale-domain-proxies/internal/domain"
 	"github.com/tailscale/hujson"
 	"io"
@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"tailscale.com/ipn"
@@ -63,103 +62,6 @@ type command struct {
 	Config    config
 }
 
-func question(b []byte) (string, int, int, bool) {
-	if len(b) < 17 || binary.BigEndian.Uint16(b[4:6]) != 1 {
-		return "", 0, 0, false
-	}
-	p := 12
-	labels := make([]string, 0, 4)
-	for {
-		if p >= len(b) {
-			return "", 0, 0, false
-		}
-		n := int(b[p])
-		p++
-		if n == 0 {
-			break
-		}
-		if n > 63 || p+n > len(b) {
-			return "", 0, 0, false
-		}
-		labels = append(labels, string(b[p:p+n]))
-		p += n
-	}
-	if p+4 > len(b) {
-		return "", 0, 0, false
-	}
-	return strings.Join(labels, "."), int(binary.BigEndian.Uint16(b[p : p+2])), p + 4, true
-}
-func answer(req []byte, end int, ip netip.Addr) []byte {
-	out := make([]byte, end+16)
-	copy(out[:end], req[:end])
-	binary.BigEndian.PutUint16(out[2:4], 0x8000|(binary.BigEndian.Uint16(req[2:4])&0x0100))
-	if ip.IsValid() {
-		binary.BigEndian.PutUint16(out[6:8], 1)
-		p := end
-		out[p] = 0xc0
-		out[p+1] = 0x0c
-		binary.BigEndian.PutUint16(out[p+2:p+4], 1)
-		binary.BigEndian.PutUint16(out[p+4:p+6], 1)
-		binary.BigEndian.PutUint32(out[p+6:p+10], 600)
-		binary.BigEndian.PutUint16(out[p+10:p+12], 4)
-		copy(out[p+12:p+16], ip.AsSlice())
-	} else {
-		out = out[:end]
-	}
-	return out
-}
-
-func serverFailure(req []byte, end int) []byte {
-	out := answer(req, end, netip.Addr{})
-	binary.BigEndian.PutUint16(out[2:4], binary.BigEndian.Uint16(out[2:4])|2)
-	return out
-}
-func ptrName(name string) (netip.Addr, bool) {
-	parts := strings.Split(strings.TrimSuffix(strings.ToLower(name), "."), ".")
-	if len(parts) != 6 || parts[4] != "in-addr" || parts[5] != "arpa" {
-		return netip.Addr{}, false
-	}
-	var octets [4]byte
-	for i := 0; i < 4; i++ {
-		var n uint16
-		for _, c := range parts[3-i] {
-			if c < '0' || c > '9' {
-				return netip.Addr{}, false
-			}
-			n = n*10 + uint16(c-'0')
-			if n > 255 {
-				return netip.Addr{}, false
-			}
-		}
-		octets[i] = byte(n)
-	}
-	return netip.AddrFrom4(octets), true
-}
-func encodeName(name string) []byte {
-	name = strings.TrimSuffix(name, ".")
-	out := make([]byte, 0, len(name)+2)
-	for _, label := range strings.Split(name, ".") {
-		out = append(out, byte(len(label)))
-		out = append(out, label...)
-	}
-	return append(out, 0)
-}
-func ptrAnswer(req []byte, end int, name string) []byte {
-	rdata := encodeName(name)
-	out := make([]byte, end+12+len(rdata))
-	copy(out[:end], req[:end])
-	binary.BigEndian.PutUint16(out[2:4], 0x8000|(binary.BigEndian.Uint16(req[2:4])&0x0100))
-	binary.BigEndian.PutUint16(out[6:8], 1)
-	p := end
-	out[p] = 0xc0
-	out[p+1] = 0x0c
-	binary.BigEndian.PutUint16(out[p+2:p+4], 12)
-	binary.BigEndian.PutUint16(out[p+4:p+6], 1)
-	binary.BigEndian.PutUint32(out[p+6:p+10], 600)
-	binary.BigEndian.PutUint16(out[p+10:p+12], uint16(len(rdata)))
-	copy(out[p+12:], rdata)
-	return out
-}
 func main() {
 	cmd, err := parseCommand(os.Args[1:])
 	if err != nil {
@@ -528,12 +430,14 @@ func newTSNet(c config) (*tsnet.Server, error) {
 
 func runEgress(ctx context.Context, c config, transport string) {
 	if transport == "tailscaled" {
-		api := domain.NewLocalAPI(c.TailscaledSocket)
-		nodeConfig, err := api.NodeConfig(ctx)
+		tailnet, err := openTailnetTransport(ctx, c, transport, false)
 		if err != nil {
-			log.Printf("domain-gateway: gateway NodeAttr unavailable: %v", err)
+			log.Fatal(err)
 		}
-		resolver, systemResolver, err := egressBackendResolver(c, nodeConfig)
+		if tailnet.NodeConfigErr != nil {
+			log.Printf("domain-gateway: gateway NodeAttr unavailable: %v", tailnet.NodeConfigErr)
+		}
+		resolver, systemResolver, err := egressBackendResolver(c, tailnet.NodeConfig)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -541,7 +445,7 @@ func runEgress(ctx context.Context, c config, transport string) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		s := &domain.Service{Identity: api, Gateways: gs, SystemResolver: func(context.Context) (string, error) { return systemUpstream() }}
+		s := &domain.Service{Identity: tailnet.Identity, Gateways: gs, SystemResolver: func(context.Context) (string, error) { return systemUpstream() }}
 		if ptrResolver, configured, err := egressPTRResolver(c); err != nil {
 			log.Fatal(err)
 		} else if configured {
@@ -559,17 +463,11 @@ func runEgress(ctx context.Context, c config, transport string) {
 		return
 	}
 	// The selected tsnet transport never falls back to the host daemon.
-	server, err := newTSNet(c)
+	tailnet, err := openTailnetTransport(ctx, c, transport, false)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if _, err := server.Up(ctx); err != nil {
-		log.Fatal(err)
-	}
-	client, err := server.LocalClient()
-	if err != nil {
-		log.Fatal(err)
-	}
+	server, client := tailnet.Server, tailnet.Client
 	if _, err := client.EditPrefs(ctx, &ipn.MaskedPrefs{Prefs: ipn.Prefs{RouteAll: true}, RouteAllSet: true}); err != nil {
 		log.Fatalf("userspace gateway cannot accept tailnet subnet routes: %v", err)
 	}
@@ -599,12 +497,10 @@ func runEgress(ctx context.Context, c config, transport string) {
 	}
 	resolverDial := resolverDialFor(upstreamResolverInterface)
 	ptrResolverDial := resolverDialFor(ptrResolverInterface)
-	identity := domain.TSNetIdentity{Client: client}
-	nodeConfig, err := identity.NodeConfig(ctx)
-	if err != nil {
-		log.Printf("domain-gateway: gateway NodeAttr unavailable: %v", err)
+	if tailnet.NodeConfigErr != nil {
+		log.Printf("domain-gateway: gateway NodeAttr unavailable: %v", tailnet.NodeConfigErr)
 	}
-	backendResolver, systemResolver, err := egressBackendResolver(c, nodeConfig)
+	backendResolver, systemResolver, err := egressBackendResolver(c, tailnet.NodeConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -639,7 +535,7 @@ func runEgress(ctx context.Context, c config, transport string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	s := &domain.Service{Identity: identity, Gateways: gs, ResolverDial: resolverDial, SystemResolver: func(context.Context) (string, error) { return systemUpstream() }, PTRLookup: func(ctx context.Context, ip netip.Addr) ([]string, error) {
+	s := &domain.Service{Identity: tailnet.Identity, Gateways: gs, ResolverDial: resolverDial, SystemResolver: func(context.Context) (string, error) { return systemUpstream() }, PTRLookup: func(ctx context.Context, ip netip.Addr) ([]string, error) {
 		return lookupPTR(ctx, ip, dnsResolvers, ptrResolverDial)
 	}}
 	if err := s.ServeTSNetGateway(ctx, server); err != nil && err != context.Canceled {
@@ -648,47 +544,14 @@ func runEgress(ctx context.Context, c config, transport string) {
 }
 
 func runDNS(ctx context.Context, c config, transport string) {
-	var identity domain.Identity
-	var nodes domain.TaggedNodeSource
-	var nodeConfig domain.NodeConfig
-	var listen func() (net.PacketConn, error)
-	if transport == "tailscaled" {
-		api := domain.NewLocalAPI(c.TailscaledSocket)
-		var err error
-		nodeConfig, err = api.NodeConfig(ctx)
-		if err != nil {
-			log.Fatalf("-mode=tailscaled requires a usable tailscaled LocalAPI: %v", err)
-		}
-		ip, err := api.TailscaleIP(ctx)
-		if err != nil {
-			log.Fatal(err)
-		}
-		identity = api
-		nodes = api
-		listen = func() (net.PacketConn, error) { return net.ListenPacket("udp", dnsListenAddress(c.Listen, ip)) }
-	} else {
-		server, err := newTSNet(c)
-		if err != nil {
-			log.Fatal(err)
-		}
-		if _, err := server.Up(ctx); err != nil {
-			log.Fatal(err)
-		}
-		client, err := server.LocalClient()
-		if err != nil {
-			log.Fatal(err)
-		}
-		id := domain.TSNetIdentity{Client: client}
-		identity = id
-		nodes = id
-		nodeConfig, err = id.NodeConfig(ctx)
-		if err != nil {
-			log.Fatal("missing or invalid domain-gateway NodeAttr: ", err)
-		}
-		ip4, _ := server.TailscaleIPs()
-		listen = func() (net.PacketConn, error) { return server.ListenPacket("udp", dnsListenAddress(c.Listen, ip4)) }
+	tailnet, err := openTailnetTransport(ctx, c, transport, true)
+	if err != nil {
+		log.Fatal(err)
 	}
-	gs, upstream, err := dnsGateways(nodeConfig)
+	if tailnet.NodeConfigErr != nil {
+		log.Fatal("missing or invalid domain-gateway NodeAttr: ", tailnet.NodeConfigErr)
+	}
+	gs, upstream, err := dnsGateways(tailnet.NodeConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -704,14 +567,46 @@ func runDNS(ctx context.Context, c config, transport string) {
 	if c.AllocationLease != "" {
 		lease, _ = time.ParseDuration(c.AllocationLease)
 	}
-	s := &domain.Service{Identity: identity, Gateways: gs, Allocations: alloc, AllocationStore: store, Lease: lease}
-	conn, err := listen()
+	s := &domain.Service{Identity: tailnet.Identity, Gateways: gs, Allocations: alloc, Lifecycle: &domain.AllocationLifecycle{Allocator: alloc, Store: store, Lease: lease}}
+	conn, err := tailnet.listenUDP(dnsListenAddress(c.Listen, tailnet.IP))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer conn.Close()
 	upstreamAddr := mustAddr(upstream)
-	serveDNS(ctx, conn, s, nodes, upstreamAddr)
+	(dnsudp.Server{
+		Upstream: upstreamAddr,
+		Decide: func(ctx context.Context, source netip.Addr, question dnsudp.Question) dnsudp.Decision {
+			if question.Type == dnsudp.TypePTR {
+				if synthetic, reverse := dnsudp.ReverseIPv4(question.Name); reverse {
+					if mapping, found := s.PTRMapping(ctx, synthetic); found {
+						return dnsudp.Decision{Outcome: dnsudp.PTR, PTRName: mapping.Domain}
+					}
+					return dnsudp.Decision{Outcome: dnsudp.PTR}
+				}
+			}
+			if ips, tagged := domain.ResolveTags(ctx, question.Name, tailnet.Nodes); tagged {
+				if question.Type == dnsudp.TypeA && len(ips) > 0 {
+					if ip, err := netip.ParseAddr(ips[0]); err == nil {
+						return dnsudp.Decision{Outcome: dnsudp.Address, Address: ip}
+					}
+				}
+				return dnsudp.Decision{Outcome: dnsudp.NoResponse}
+			}
+			if !source.IsValid() {
+				return dnsudp.Decision{Outcome: dnsudp.NoResponse}
+			}
+			ip, outcome := s.DNSAnswer(ctx, source, question.Name)
+			switch outcome {
+			case domain.DNSSynthesized:
+				return dnsudp.Decision{Outcome: dnsudp.Address, Address: ip}
+			case domain.DNSUnavailable:
+				return dnsudp.Decision{Outcome: dnsudp.Unavailable}
+			default:
+				return dnsudp.Decision{Outcome: dnsudp.Passthrough}
+			}
+		},
+	}).Serve(ctx, conn)
 }
 
 func dnsListenAddress(configured string, ip netip.Addr) string {
@@ -732,76 +627,6 @@ func allocationStore(ctx context.Context, c config) (domain.AllocationStore, fun
 	return nil, func() {}, nil
 }
 
-func serveDNS(ctx context.Context, conn net.PacketConn, s *domain.Service, nodes domain.TaggedNodeSource, upstreamAddr *net.UDPAddr) {
-	pool := sync.Pool{New: func() any { return make([]byte, 65535) }}
-	jobs := make(chan struct{}, 256)
-	for {
-		buf := pool.Get().([]byte)
-		n, src, e := conn.ReadFrom(buf)
-		if e != nil {
-			pool.Put(buf)
-			continue
-		}
-		jobs <- struct{}{}
-		go func(b []byte, src net.Addr) {
-			defer func() { <-jobs; pool.Put(b) }()
-			name, typ, end, ok := question(b)
-			if !ok {
-				return
-			}
-			if typ == 12 {
-				if synthetic, reverse := ptrName(name); reverse {
-					if mapping, found := s.PTRMapping(ctx, synthetic); found {
-						conn.WriteTo(ptrAnswer(b, end, mapping.Domain), src)
-					} else {
-						conn.WriteTo(answer(b, end, netip.Addr{}), src)
-					}
-					return
-				}
-			}
-			if ips, tagged := domain.ResolveTags(ctx, name, nodes); tagged {
-				if typ == 1 && len(ips) > 0 {
-					if ip, err := netip.ParseAddr(ips[0]); err == nil {
-						conn.WriteTo(answer(b, end, ip), src)
-					}
-				}
-				return
-			}
-			srcAddr, ok := sourceIP(src)
-			if !ok {
-				return
-			}
-			ip, outcome := s.DNSAnswer(ctx, srcAddr, name)
-			if outcome == domain.DNSSynthesized {
-				if typ == 1 {
-					conn.WriteTo(answer(b, end, ip), src)
-				} else if typ == 28 {
-					conn.WriteTo(answer(b, end, netip.Addr{}), src)
-				}
-				return
-			}
-			if outcome == domain.DNSUnavailable {
-				conn.WriteTo(serverFailure(b, end), src)
-				return
-			}
-			// Resource misses and unauthorized queries intentionally preserve ordinary DNS.
-			forward(conn, b[:n], src, upstreamAddr)
-		}(buf[:n], src)
-	}
-}
-
-func sourceIP(source net.Addr) (netip.Addr, bool) {
-	if udp, ok := source.(*net.UDPAddr); ok {
-		addr, ok := netip.AddrFromSlice(udp.IP)
-		return addr, ok
-	}
-	addrPort, err := netip.ParseAddrPort(source.String())
-	if err != nil {
-		return netip.Addr{}, false
-	}
-	return addrPort.Addr(), true
-}
-
 func systemUpstream() (string, error) {
 	b, err := os.ReadFile("/etc/resolv.conf")
 	if err != nil {
@@ -817,21 +642,6 @@ func systemUpstream() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("system resolver has no non-Tailscale nameserver")
-}
-func forward(listener net.PacketConn, request []byte, client net.Addr, upstream *net.UDPAddr) {
-	c, e := net.DialUDP("udp", nil, upstream)
-	if e != nil {
-		return
-	}
-	defer c.Close()
-	c.SetDeadline(time.Now().Add(2 * time.Second))
-	if _, e = c.Write(request); e != nil {
-		return
-	}
-	buf := make([]byte, 65535)
-	if n, e := c.Read(buf); e == nil {
-		listener.WriteTo(buf[:n], client)
-	}
 }
 func mustAddr(s string) *net.UDPAddr {
 	a, e := net.ResolveUDPAddr("udp", s)

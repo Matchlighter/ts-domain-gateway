@@ -191,6 +191,7 @@ type Service struct {
 	// stateless and recover mappings through DNS PTR records.
 	AllocationStore AllocationStore
 	StatePath       string
+	Lifecycle       *AllocationLifecycle
 	// PTRLookup resolves synthetic addresses through the DNS authority. It is
 	// overridden by tsnet gateways so lookup stays on the tailnet DNS path.
 	PTRLookup    func(context.Context, netip.Addr) ([]string, error)
@@ -214,22 +215,16 @@ const (
 	DNSUnavailable
 )
 
-func (s *Service) lease() time.Duration {
-	if s.Lease > 0 {
-		return s.Lease
-	}
-	return time.Hour
-}
-func (s *Service) now() time.Time {
-	if s.Now != nil {
-		return s.Now()
-	}
-	return time.Now()
-}
-
 func (s *Service) DNS(ctx context.Context, source netip.Addr, name string) (netip.Addr, bool) {
 	ip, outcome := s.DNSAnswer(ctx, source, name)
 	return ip, outcome == DNSSynthesized
+}
+
+func (s *Service) lifecycle() AllocationLifecycle {
+	if s.Lifecycle != nil {
+		return *s.Lifecycle
+	}
+	return AllocationLifecycle{Allocator: s.Allocations, Store: s.AllocationStore, StatePath: s.StatePath, Lease: s.Lease, Now: s.Now}
 }
 
 // DNSAnswer distinguishes an ordinary passthrough name from an authorized
@@ -258,30 +253,8 @@ func (s *Service) DNSAnswer(ctx context.Context, source netip.Addr, name string)
 		return netip.Addr{}, DNSPassthrough
 	}
 	gateway := rangeKey(ranges)
-	if s.AllocationStore != nil {
-		if ip, found, err := s.AllocationStore.LookupKey(ctx, s.Allocations, gateway, name, s.now(), s.lease()); err != nil {
-			s.Passthrough.Add(1)
-			return netip.Addr{}, DNSUnavailable
-		} else if found {
-			s.Synthesized.Add(1)
-			return ip, DNSSynthesized
-		}
-	} else if ip, found := s.Allocations.LookupKeyLive(gateway, name, s.now()); found {
-		s.Synthesized.Add(1)
-		return ip, DNSSynthesized
-	}
-	var ip netip.Addr
-	if s.AllocationStore != nil {
-		ip, err = s.AllocationStore.Allocate(ctx, s.Allocations, gateway, ranges, name, s.now(), s.lease())
-	} else {
-		ip, err = s.Allocations.Allocate(gateway, ranges, name)
-	}
+	ip, err := s.lifecycle().Allocate(ctx, gateway, ranges, name)
 	if err != nil {
-		s.Passthrough.Add(1)
-		return netip.Addr{}, DNSUnavailable
-	}
-	// StatePath remains for callers using the original JSON file API.
-	if s.AllocationStore == nil && s.StatePath != "" && s.Allocations.Save(s.StatePath) != nil {
 		s.Passthrough.Add(1)
 		return netip.Addr{}, DNSUnavailable
 	}
@@ -292,11 +265,7 @@ func (s *Service) DNSAnswer(ctx context.Context, source netip.Addr, name string)
 // PTRMapping resolves a synthetic address locally first, then through the
 // shared allocation authority so any DNS replica can answer a peer's PTR.
 func (s *Service) PTRMapping(ctx context.Context, ip netip.Addr) (Mapping, bool) {
-	if s.AllocationStore == nil {
-		return s.Allocations.Lookup(ip)
-	}
-	mapping, ok, err := s.AllocationStore.Lookup(ctx, s.Allocations, ip, s.now(), s.lease())
-	return mapping, err == nil && ok
+	return s.lifecycle().Lookup(ctx, ip)
 }
 func (s *Service) Flow(ctx context.Context, source, destination netip.Addr, proto string, port uint16) (Mapping, Gateway, bool) {
 	m, ok := s.PTRMapping(ctx, destination)
