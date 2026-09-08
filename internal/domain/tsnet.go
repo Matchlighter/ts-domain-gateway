@@ -75,9 +75,6 @@ func (i TSNetIdentity) TaggedNodes(ctx context.Context) ([]TaggedNode, error) {
 		if status.Self.Tags != nil {
 			node.Tags = status.Self.Tags.AsSlice()
 		}
-		if status.Self.PrimaryRoutes != nil {
-			node.PrimaryRoutes = status.Self.PrimaryRoutes.AsSlice()
-		}
 		nodes = append(nodes, node)
 	}
 	for _, peer := range status.Peer {
@@ -85,9 +82,6 @@ func (i TSNetIdentity) TaggedNodes(ctx context.Context) ([]TaggedNode, error) {
 			node := statusNode{TailscaleIPs: peer.TailscaleIPs}
 			if peer.Tags != nil {
 				node.Tags = peer.Tags.AsSlice()
-			}
-			if peer.PrimaryRoutes != nil {
-				node.PrimaryRoutes = peer.PrimaryRoutes.AsSlice()
 			}
 			nodes = append(nodes, node)
 		}

@@ -15,13 +15,9 @@ import (
 	"tailscale.com/ipn/ipnstate"
 )
 
-type taggedNodes []domain.TaggedNode
-
-func (n taggedNodes) TaggedNodes(context.Context) ([]domain.TaggedNode, error) { return n, nil }
-
 func TestParseCommandSeparatesRoleTransportAndConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"tsnet":{"dir":"from-file","hostname":"from-file-host","auth_key":"from-file-key","control_url":"https://headscale.example.test","tags":["tag:file"]},"database":"postgres://from-file","egress":{"tag":"tag:file","ranges":["10.254.0.0/18"],"dns_resolver":"192.0.2.53"}}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"tsnet":{"dir":"from-file","hostname":"from-file-host","auth_key":"from-file-key","control_url":"https://headscale.example.test","tags":["tag:file"]},"database":"postgres://from-file","egress":{"ranges":["10.254.0.0/18"],"dns_resolver":"192.0.2.53"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cmd, err := parseCommand([]string{"egress", "-config", path, "-mode", "tailscaled", "-gateway-listen", "127.0.0.1:15001", "-tsnet-control-url", "https://flag.example.test", "-tsnet-tags", "tag:one,tag:two"})
@@ -37,7 +33,7 @@ func TestParseCommandSeparatesRoleTransportAndConfig(t *testing.T) {
 }
 
 func TestEgressDNSResolverOverridesPTRResolver(t *testing.T) {
-	c := config{Egress: &egressConfig{Tag: "tag:gateway1", Ranges: []string{"10.254.0.0/18"}, DNSResolver: "192.0.2.53"}}
+	c := config{Egress: &egressConfig{Ranges: []string{"10.254.0.0/18"}, DNSResolver: "192.0.2.53"}}
 	resolver, configured, err := egressPTRResolver(c)
 	if err != nil {
 		t.Fatal(err)
@@ -49,20 +45,20 @@ func TestEgressDNSResolverOverridesPTRResolver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gateways["tag:gateway1"].Resolver; got != "100.100.100.100:53" {
+	if got := gateways[localEgressGatewayKey].Resolver; got != "100.100.100.100:53" {
 		t.Fatalf("backend resolver = %q, want appcap fallback", got)
 	}
 }
 
 func TestEgressDNSResolverRejectsNonIP(t *testing.T) {
-	c := config{Egress: &egressConfig{Tag: "tag:gateway1", Ranges: []string{"10.254.0.0/18"}, DNSResolver: "resolver.example.test"}}
+	c := config{Egress: &egressConfig{Ranges: []string{"10.254.0.0/18"}, DNSResolver: "resolver.example.test"}}
 	if _, _, err := egressPTRResolver(c); err == nil {
 		t.Fatal("egress accepted a non-IP DNS resolver")
 	}
 }
 
 func TestEgressUpstreamDNSInterface(t *testing.T) {
-	base := config{Egress: &egressConfig{Tag: "tag:gateway1", Ranges: []string{"10.254.0.0/18"}}}
+	base := config{Egress: &egressConfig{Ranges: []string{"10.254.0.0/18"}}}
 	if got, err := egressUpstreamDNSInterface(base); err != nil || got != "auto" {
 		t.Fatalf("default interface = %q, %v", got, err)
 	}
@@ -77,7 +73,7 @@ func TestEgressUpstreamDNSInterface(t *testing.T) {
 		t.Fatal("accepted invalid interface")
 	}
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"egress":{"tag":"tag:gateway1","ranges":["10.254.0.0/18"],"upstream_dns_interface":"invalid"}}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"egress":{"ranges":["10.254.0.0/18"],"upstream_dns_interface":"invalid"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := parseCommand([]string{"egress", "-config", path}); err == nil {
@@ -98,7 +94,7 @@ func TestEgressBackendResolverPrecedence(t *testing.T) {
 }
 
 func TestEgressRejectsInvalidLocalUpstreamResolver(t *testing.T) {
-	c := config{Egress: &egressConfig{Tag: "tag:gateway1", Ranges: []string{"10.254.0.0/18"}}, UpstreamResolver: "resolver.example.test"}
+	c := config{Egress: &egressConfig{Ranges: []string{"10.254.0.0/18"}}, UpstreamResolver: "resolver.example.test"}
 	if _, err := configuredResolver(c.UpstreamResolver); err == nil {
 		t.Fatal("accepted a local resolver without a port")
 	}
@@ -219,7 +215,7 @@ func TestParseCommandRejectsInvalidAllocationLease(t *testing.T) {
 
 func TestParseCommandScopesEgressAssignmentToEgressRole(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	data := []byte(`{"egress":{"tag":"tag:gateway1","ranges":["10.254.0.0/18"]}}`)
+	data := []byte(`{"egress":{"ranges":["10.254.0.0/18"]}}`)
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +226,7 @@ func TestParseCommandScopesEgressAssignmentToEgressRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cmd.Config.Egress.Tag != "tag:gateway1" || len(cmd.Config.Egress.Ranges) != 1 {
+	if len(cmd.Config.Egress.Ranges) != 1 {
 		t.Fatalf("egress assignment = %+v", cmd.Config.Egress)
 	}
 	path = filepath.Join(t.TempDir(), "missing.json")
@@ -242,15 +238,22 @@ func TestParseCommandScopesEgressAssignmentToEgressRole(t *testing.T) {
 	}
 }
 
-func TestDNSGatewayTopologyUsesNodeAttrOverrideOverDiscovery(t *testing.T) {
-	override := netip.MustParsePrefix("10.254.0.0/18")
-	discovered := netip.MustParsePrefix("10.254.64.0/18")
-	config := domain.NodeConfig{UpstreamDNS: "127.0.0.1:53", Gateways: map[string][]netip.Prefix{"tag:gateway1": {override}}}
-	got, _, err := dnsGatewayTopology(context.Background(), config, taggedNodes{{Tags: map[string]struct{}{"tag:gateway1": {}}, PrimaryRoutes: []netip.Prefix{discovered}}})
+func TestParseCommandRejectsRemovedEgressTag(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"egress":{"tag":"tag:gateway1","ranges":["10.254.0.0/18"]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseCommand([]string{"egress", "-config", path}); err == nil || !strings.Contains(err.Error(), "egress.tag is no longer supported") {
+		t.Fatalf("legacy egress tag error = %v", err)
+	}
+}
+
+func TestDNSGatewaysDoNotConfigureRoutes(t *testing.T) {
+	got, _, err := dnsGateways(domain.NodeConfig{UpstreamDNS: "127.0.0.1:53"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prefixes := got["tag:gateway1"].Prefixes; len(prefixes) != 1 || prefixes[0] != override {
-		t.Fatalf("topology = %v, want override %v", prefixes, override)
+	if len(got) != 0 {
+		t.Fatalf("DNS gateway routes = %v, want none", got)
 	}
 }

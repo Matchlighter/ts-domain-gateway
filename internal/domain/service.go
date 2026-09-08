@@ -159,9 +159,8 @@ func (l *LocalAPI) TaggedNodes(ctx context.Context) ([]TaggedNode, error) {
 }
 
 type statusNode struct {
-	TailscaleIPs  []netip.Addr   `json:"TailscaleIPs"`
-	Tags          []string       `json:"Tags"`
-	PrimaryRoutes []netip.Prefix `json:"PrimaryRoutes"`
+	TailscaleIPs []netip.Addr `json:"TailscaleIPs"`
+	Tags         []string     `json:"Tags"`
 }
 
 func taggedNodes(nodes []statusNode) []TaggedNode {
@@ -176,7 +175,7 @@ func taggedNodes(nodes []statusNode) []TaggedNode {
 		}
 		for _, address := range node.TailscaleIPs {
 			if address.Is4() {
-				result = append(result, TaggedNode{Address: address.String(), Tags: tags, PrimaryRoutes: node.PrimaryRoutes})
+				result = append(result, TaggedNode{Address: address.String(), Tags: tags})
 			}
 		}
 	}

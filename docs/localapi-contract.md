@@ -37,7 +37,8 @@ malformed wildcard patterns grant no access.
 
 Every capability-level `range` is required and is an array of non-overlapping,
 canonical IPv4 CIDRs. It is the synthetic pool for DNS allocation and must
-exactly equal the local egress assignment used for flow enforcement. Invalid,
+exactly equal the local egress assignment that the egress instance advertises.
+DNS does not discover or configure routes. Invalid,
 missing, or conflicting ranges from matching capability entries grant no
 synthetic DNS answer.
 

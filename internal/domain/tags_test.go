@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/netip"
 	"testing"
 )
 
@@ -32,29 +31,5 @@ func TestResolveTagsUsesCurrentTailnetNodeTags(t *testing.T) {
 	addresses, tagged = ResolveTags(context.Background(), "prod.tags.", source)
 	if !tagged || len(addresses) != 1 || addresses[0] != "100.64.0.3" {
 		t.Fatalf("refreshed tag resolution = %v, %v", addresses, tagged)
-	}
-}
-
-func TestDiscoverGatewayRoutesUnionsClusterPrimaryRoutes(t *testing.T) {
-	routes, err := DiscoverGatewayRoutes([]TaggedNode{
-		{Tags: map[string]struct{}{"tag:gateway1": {}}, PrimaryRoutes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/18")}},
-		{Tags: map[string]struct{}{"tag:gateway1": {}}, PrimaryRoutes: []netip.Prefix{netip.MustParsePrefix("10.254.64.0/18")}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := routes["tag:gateway1"]
-	if len(got) != 2 || got[0] != netip.MustParsePrefix("10.254.0.0/18") || got[1] != netip.MustParsePrefix("10.254.64.0/18") {
-		t.Fatalf("routes = %v", got)
-	}
-}
-
-func TestDiscoverGatewayRoutesRejectsOverlapsAcrossTags(t *testing.T) {
-	_, err := DiscoverGatewayRoutes([]TaggedNode{
-		{Tags: map[string]struct{}{"tag:gateway1": {}}, PrimaryRoutes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/18")}},
-		{Tags: map[string]struct{}{"tag:gateway2": {}}, PrimaryRoutes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/19")}},
-	})
-	if err == nil {
-		t.Fatal("accepted ambiguous active routes")
 	}
 }

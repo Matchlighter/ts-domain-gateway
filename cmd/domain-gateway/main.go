@@ -36,14 +36,17 @@ type config struct {
 	TSNet            tsnetConfig   `json:"tsnet"`
 }
 
-// egressConfig is the local startup authority for one egress instance. It is
-// deliberately separate from the DNS NodeAttr, which observes active routes.
+// egressConfig is the local startup authority for one egress instance. Its
+// ranges must be advertised by egress and exactly match the policy grant.
 type egressConfig struct {
-	Tag                  string   `json:"tag"`
 	Ranges               []string `json:"ranges"`
 	DNSResolver          string   `json:"dns_resolver"`
 	UpstreamDNSInterface string   `json:"upstream_dns_interface"`
 }
+
+// localEgressGatewayKey names the single local gateway entry used for egress
+// flow enforcement and route advertisement.
+const localEgressGatewayKey = "local-egress"
 
 type tsnetConfig struct {
 	Dir        string   `json:"dir"`
@@ -193,6 +196,15 @@ func parseCommand(args []string) (command, error) {
 			return command{}, fmt.Errorf("%s is no longer supported; use tsnet.%s", name, strings.TrimPrefix(name, "tsnet_"))
 		}
 	}
+	var legacy struct {
+		Egress map[string]json.RawMessage `json:"egress"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return command{}, err
+	}
+	if _, found := legacy.Egress["tag"]; found {
+		return command{}, fmt.Errorf("egress.tag is no longer supported")
+	}
 	var c config
 	if err := json.Unmarshal(data, &c); err != nil {
 		return command{}, err
@@ -287,8 +299,8 @@ func egressBackendResolver(c config, nodeConfig domain.NodeConfig) (string, bool
 }
 
 func egressGateways(c config, resolver string, systemResolver ...bool) (map[string]domain.Gateway, error) {
-	if c.Egress == nil || c.Egress.Tag == "" || !strings.HasPrefix(c.Egress.Tag, "tag:") || len(c.Egress.Ranges) == 0 {
-		return nil, fmt.Errorf("egress requires egress.tag and at least one egress.ranges entry")
+	if c.Egress == nil || len(c.Egress.Ranges) == 0 {
+		return nil, fmt.Errorf("egress requires at least one egress.ranges entry")
 	}
 	prefixes := make([]netip.Prefix, 0, len(c.Egress.Ranges))
 	for _, raw := range c.Egress.Ranges {
@@ -303,7 +315,7 @@ func egressGateways(c config, resolver string, systemResolver ...bool) (map[stri
 		}
 		prefixes = append(prefixes, prefix)
 	}
-	return map[string]domain.Gateway{c.Egress.Tag: {Prefixes: prefixes, Resolver: resolver, SystemResolver: len(systemResolver) != 0 && systemResolver[0]}}, nil
+	return map[string]domain.Gateway{localEgressGatewayKey: {Prefixes: prefixes, Resolver: resolver, SystemResolver: len(systemResolver) != 0 && systemResolver[0]}}, nil
 }
 
 // egressUpstreamDNSInterface selects how tsnet reaches an appcap resolver.
@@ -450,7 +462,7 @@ func configPath(args []string) (string, error) {
 	return filepath.Clean(path), nil
 }
 
-func gateways(nodeConfig domain.NodeConfig) (map[string]domain.Gateway, string, error) {
+func dnsGateways(nodeConfig domain.NodeConfig) (map[string]domain.Gateway, string, error) {
 	upstream := nodeConfig.UpstreamDNS
 	var err error
 	if domain.IsSystemResolver(upstream) {
@@ -459,71 +471,7 @@ func gateways(nodeConfig domain.NodeConfig) (map[string]domain.Gateway, string, 
 			return nil, "", err
 		}
 	}
-	gs := make(map[string]domain.Gateway, len(nodeConfig.Gateways))
-	for tag, prefixes := range nodeConfig.Gateways {
-		gs[tag] = domain.Gateway{Prefixes: prefixes, Resolver: upstream}
-	}
-	return gs, upstream, nil
-}
-
-// dnsGatewayTopology makes NodeAttr ranges an explicit administrative override
-// while the normal path observes active PrimaryRoutes from stable status.
-func dnsGatewayTopology(ctx context.Context, nodeConfig domain.NodeConfig, nodes domain.TaggedNodeSource) (map[string]domain.Gateway, string, error) {
-	upstream := nodeConfig.UpstreamDNS
-	if domain.IsSystemResolver(upstream) {
-		var err error
-		upstream, err = systemUpstream()
-		if err != nil {
-			return nil, "", err
-		}
-	}
-	discovered, discoveryErr := func() (map[string][]netip.Prefix, error) {
-		inventory, err := nodes.TaggedNodes(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return domain.DiscoverGatewayRoutes(inventory)
-	}()
-	if nodeConfig.Gateways != nil {
-		if discoveryErr != nil || !samePrefixes(nodeConfig.Gateways, discovered) {
-			log.Printf("domain-gateway: NodeAttr gateway override differs from active route discovery (override=%v discovered=%v error=%v)", nodeConfig.Gateways, discovered, discoveryErr)
-		}
-		gs := make(map[string]domain.Gateway, len(nodeConfig.Gateways))
-		for tag, prefixes := range nodeConfig.Gateways {
-			gs[tag] = domain.Gateway{Prefixes: prefixes, Resolver: upstream}
-		}
-		return gs, upstream, nil
-	}
-	if discoveryErr != nil {
-		return nil, upstream, discoveryErr
-	}
-	gs := make(map[string]domain.Gateway, len(discovered))
-	for tag, prefixes := range discovered {
-		gs[tag] = domain.Gateway{Prefixes: prefixes, Resolver: upstream}
-	}
-	return gs, upstream, nil
-}
-
-func samePrefixes(a, b map[string][]netip.Prefix) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for tag, left := range a {
-		right, ok := b[tag]
-		if !ok || len(left) != len(right) {
-			return false
-		}
-		for _, prefix := range left {
-			found := false
-			for _, candidate := range right {
-				found = found || prefix == candidate
-			}
-			if !found {
-				return false
-			}
-		}
-	}
-	return true
+	return map[string]domain.Gateway{}, upstream, nil
 }
 
 func newTSNet(c config) (*tsnet.Server, error) {
@@ -698,17 +646,9 @@ func runDNS(ctx context.Context, c config, transport string) {
 		ip4, _ := server.TailscaleIPs()
 		listen = func() (net.PacketConn, error) { return server.ListenPacket("udp", dnsListenAddress(c.Listen, ip4)) }
 	}
-	gs, upstream, err := dnsGatewayTopology(ctx, nodeConfig, nodes)
+	gs, upstream, err := dnsGateways(nodeConfig)
 	if err != nil {
-		discoveryErr := err
-		// Discovery is per-new-allocation operational state. DNS still starts so
-		// an authorized protected request can receive SERVFAIL instead of an
-		// upstream answer while status recovers.
-		gs, upstream, err = gateways(nodeConfig)
-		if err != nil {
-			log.Fatal(err)
-		}
-		log.Printf("domain-gateway: active route discovery unavailable at startup: %v", discoveryErr)
+		log.Fatal(err)
 	}
 	alloc := domain.NewAllocator()
 	store, closeStore, err := allocationStore(ctx, c)

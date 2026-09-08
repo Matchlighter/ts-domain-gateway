@@ -7,29 +7,22 @@ import (
 	"testing"
 )
 
-func TestNodeAttrConfiguresTagKeyedMultiRangeGateway(t *testing.T) {
-	got, ok := ConfigFromNodeAttrs(map[string]json.RawMessage{NodeConfigCapability: json.RawMessage(`[{"upstreamDNS":"system","gateways":{"tag:home":{"range":["10.254.0.0/30","10.254.1.0/30"]}}}]`)})
-	if !ok || got.UpstreamDNS != "system" || len(got.Gateways["tag:home"]) != 2 {
-		t.Fatal(got, ok)
-	}
-	if got.Gateways["tag:home"][1] != netip.MustParsePrefix("10.254.1.0/30") {
-		t.Fatalf("second range = %s", got.Gateways["tag:home"][1])
-	}
-	if _, ok := ConfigFromNodeAttrs(map[string]json.RawMessage{NodeConfigCapability: json.RawMessage(`[{"upstreamDNS":"not-an-address","gateways":{"tag:home":{"range":["10.254.0.0/24"]}}}]`)}); ok {
-		t.Fatal("accepted malformed resolver")
+func TestNodeAttrRejectsGatewayRanges(t *testing.T) {
+	if _, ok := ConfigFromNodeAttrs(map[string]json.RawMessage{NodeConfigCapability: json.RawMessage(`[{"upstreamDNS":"system","gateways":{"tag:home":{"range":["10.254.0.0/30"]}}}]`)}); ok {
+		t.Fatal("accepted removed gateway ranges")
 	}
 }
 
 func TestNodeAttrAllowsRouteDiscoveryWithoutGatewayOverride(t *testing.T) {
 	got, ok := ConfigFromNodeAttrs(map[string]json.RawMessage{NodeConfigCapability: json.RawMessage(`[{"upstreamDNS":"system"}]`)})
-	if !ok || got.UpstreamDNS != "system" || !got.HasUpstreamDNS || got.Gateways != nil {
+	if !ok || got.UpstreamDNS != "system" || !got.HasUpstreamDNS {
 		t.Fatalf("config = %#v, ok = %v", got, ok)
 	}
 }
 
 func TestMissingNodeAttrUsesSystemResolverAndRouteDiscovery(t *testing.T) {
 	got, ok := ConfigFromNodeAttrs(nil)
-	if !ok || got.UpstreamDNS != "system" || got.HasUpstreamDNS || got.Gateways != nil {
+	if !ok || got.UpstreamDNS != "system" || got.HasUpstreamDNS {
 		t.Fatalf("config = %#v, ok = %v", got, ok)
 	}
 }
