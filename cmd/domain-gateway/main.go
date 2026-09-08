@@ -722,10 +722,7 @@ func runDNS(ctx context.Context, c config, transport string) {
 	if c.AllocationLease != "" {
 		lease, _ = time.ParseDuration(c.AllocationLease)
 	}
-	s := &domain.Service{Identity: identity, Gateways: gs, Allocations: alloc, AllocationStore: store, Lease: lease, GatewayTopology: func(ctx context.Context) (map[string]domain.Gateway, error) {
-		gs, _, err := dnsGatewayTopology(ctx, nodeConfig, nodes)
-		return gs, err
-	}}
+	s := &domain.Service{Identity: identity, Gateways: gs, Allocations: alloc, AllocationStore: store, Lease: lease}
 	conn, err := listen()
 	if err != nil {
 		log.Fatal(err)

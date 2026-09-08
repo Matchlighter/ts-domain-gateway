@@ -63,7 +63,6 @@ func (r *Resource) UnmarshalJSON(data []byte) error {
 }
 
 type Grant struct {
-	Gateway     string     `json:"gateway"`
 	UpstreamDNS string     `json:"upstreamDNS"`
 	Resources   []Resource `json:"resources"`
 	Ranges      []netip.Prefix
@@ -71,7 +70,6 @@ type Grant struct {
 
 func (g *Grant) UnmarshalJSON(data []byte) error {
 	var grant struct {
-		Gateway     string          `json:"gateway"`
 		UpstreamDNS string          `json:"upstreamDNS"`
 		Resources   []Resource      `json:"resources"`
 		Ranges      json.RawMessage `json:"range"`
@@ -79,10 +77,7 @@ func (g *Grant) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &grant); err != nil {
 		return err
 	}
-	g.Gateway, g.UpstreamDNS, g.Resources = grant.Gateway, grant.UpstreamDNS, grant.Resources
-	if grant.Ranges == nil {
-		return nil
-	}
+	g.UpstreamDNS, g.Resources = grant.UpstreamDNS, grant.Resources
 	var values []string
 	if err := json.Unmarshal(grant.Ranges, &values); err != nil || len(values) == 0 {
 		return errors.New("invalid gateway range")
@@ -201,7 +196,9 @@ func validPolicyResolver(resolver string) bool {
 }
 
 // Parse validates each independent opaque capability; invalid entries cannot authorize.
-func Parse(capmap map[string]json.RawMessage, gateways map[string]Gateway) []Grant {
+// A capability range is both its synthetic allocation pool and its egress
+// assignment; the policy no longer carries a separate gateway selector.
+func Parse(capmap map[string]json.RawMessage) []Grant {
 	raw, ok := capmap[Capability]
 	if !ok {
 		return nil
@@ -213,13 +210,8 @@ func Parse(capmap map[string]json.RawMessage, gateways map[string]Gateway) []Gra
 	grants := make([]Grant, 0, len(entries))
 	for _, entry := range entries {
 		var g Grant
-		if json.Unmarshal(entry, &g) != nil || g.Gateway == "" || len(g.Resources) == 0 {
+		if json.Unmarshal(entry, &g) != nil || len(g.Ranges) == 0 || len(g.Resources) == 0 {
 			continue
-		}
-		if gateways != nil {
-			if _, ok := gateways[g.Gateway]; !ok {
-				continue
-			}
 		}
 		valid := g.UpstreamDNS == "" || validPolicyResolver(g.UpstreamDNS)
 		for i := range g.Resources {
@@ -245,15 +237,11 @@ func Parse(capmap map[string]json.RawMessage, gateways map[string]Gateway) []Gra
 // GatewayFor returns the policy-selected gateway for an authorized flow. A
 // resource override wins over a grant override, which wins over the gateway's
 // NodeAttr resolver. Conflicting equally-specific policy choices fail closed.
-func GatewayFor(grants []Grant, gateways map[string]Gateway, tag, name, proto string, port uint16) (Gateway, bool) {
-	gateway, ok := gateways[tag]
-	if !ok {
-		return Gateway{}, false
-	}
+func GatewayFor(grants []Grant, gateway Gateway, name, proto string, port uint16) (Gateway, bool) {
 	resolver, priority := gateway.Resolver, 0
 	matched := false
 	for _, grant := range grants {
-		if grant.Gateway != tag {
+		if !samePrefixSlice(grant.Ranges, gateway.Prefixes) {
 			continue
 		}
 		for _, resource := range grant.Resources {
@@ -284,9 +272,9 @@ func GatewayFor(grants []Grant, gateways map[string]Gateway, tag, name, proto st
 	return gateway, true
 }
 
-func Authorize(grants []Grant, gateway, name, proto string, port uint16) bool {
+func Authorize(grants []Grant, prefixes []netip.Prefix, name, proto string, port uint16) bool {
 	for _, g := range grants {
-		if g.Gateway != gateway {
+		if !samePrefixSlice(g.Ranges, prefixes) {
 			continue
 		}
 		for _, r := range g.Resources {
@@ -298,31 +286,30 @@ func Authorize(grants []Grant, gateway, name, proto string, port uint16) bool {
 	return false
 }
 
-// GatewayForName selects the gateway and any capability-level IP-pool
-// override for a protected domain. Conflicting matching assignments fail
-// closed; an unset range defers to discovered or NodeAttr topology.
-func GatewayForName(grants []Grant, name string) (string, []netip.Prefix, bool) {
-	var gateway string
+// RangesForName selects a capability's synthetic allocation pool. Conflicting
+// matching assignments fail closed.
+func RangesForName(grants []Grant, name string) ([]netip.Prefix, bool) {
 	var ranges []netip.Prefix
 	for _, grant := range grants {
 		for _, resource := range grant.Resources {
 			if !match(resource.Domain, name) {
 				continue
 			}
-			if gateway != "" && gateway != grant.Gateway {
-				return "", nil, false
-			}
-			gateway = grant.Gateway
-			if len(grant.Ranges) == 0 {
-				continue
-			}
 			if ranges != nil && !samePrefixSlice(ranges, grant.Ranges) {
-				return "", nil, false
+				return nil, false
 			}
 			ranges = grant.Ranges
 		}
 	}
-	return gateway, ranges, gateway != ""
+	return ranges, ranges != nil
+}
+
+func rangeKey(prefixes []netip.Prefix) string {
+	parts := make([]string, len(prefixes))
+	for i, prefix := range prefixes {
+		parts[i] = prefix.String()
+	}
+	return strings.Join(parts, ",")
 }
 
 func samePrefixSlice(a, b []netip.Prefix) bool {

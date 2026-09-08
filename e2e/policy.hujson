@@ -11,7 +11,7 @@
       "dst": ["tag:dns", "tag:gateway1"],
       "app": {
         "matchlighter.net/cap/domain-gateway": [{
-          "gateway": "tag:gateway1",
+          "range": ["10.254.0.0/18"],
           "resources": [{"domain": "example.com", "ip": ["tcp:80", "tcp:443"]}]
         }]
       }

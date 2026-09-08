@@ -5,8 +5,8 @@
             "src": [
                 "group:whatever"
             ],
-            // Both DNS and egress need this authorization grant. The range is
-            // consumed by DNS allocation; egress keeps its local assignment.
+            // Both DNS and egress need this authorization grant. range is the
+            // synthetic pool and must match the egress local assignment.
             "dst": [
                 "tag:gateway1",
                 "tag:dns"
@@ -14,9 +14,8 @@
             "app": {
                 "matchlighter.net/cap/domain-gateway": [
                     {
-                        "gateway": "tag:gateway1",
-                        // Override the DNS synthetic IP pool for this gateway.
                         "range": ["10.254.0.0/18"],
+                        // DNS allocates from this synthetic IP pool.
                         // Optional resolver for every resource in this grant. It must be
                         // a concrete host:port endpoint, never "system".
                         "upstreamDNS": "192.0.2.53:53",

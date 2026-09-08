@@ -26,9 +26,9 @@ func (g gatewayIdentity) IsGateway(_ context.Context, source netip.Addr, _ map[s
 
 func TestCapabilitiesAndAllocation(t *testing.T) {
 	g := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
-	raw := json.RawMessage(`[{"gateway":"tag:home","resources":[{"domain":"*.dev.example.com","ip":["tcp:443"]}]}]`)
-	grants := Parse(map[string]json.RawMessage{Capability: raw}, g)
-	if !Authorize(grants, "tag:home", "a.dev.example.com", "tcp", 443) || Authorize(grants, "tag:home", "a.b.dev.example.com", "tcp", 443) {
+	raw := json.RawMessage(`[{"range":["10.254.0.0/29"],"resources":[{"domain":"*.dev.example.com","ip":["tcp:443"]}]}]`)
+	grants := Parse(map[string]json.RawMessage{Capability: raw})
+	if !Authorize(grants, g["tag:home"].Prefixes, "a.dev.example.com", "tcp", 443) || Authorize(grants, g["tag:home"].Prefixes, "a.b.dev.example.com", "tcp", 443) {
 		t.Fatal("wildcard or port matcher incorrect")
 	}
 	a := NewAllocator()
@@ -56,9 +56,9 @@ func TestAuthorizeDomainWildcardsAtTheirDefinedDepths(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
-				{"gateway":"tag:home","resources":[{"domain":"` + test.pattern + `","ip":["tcp:443"]}]}
-			]`)}, gateways)
-			if got := Authorize(grants, "tag:home", test.domain, "tcp", 443); got != test.allowed {
+				{"range":["10.254.0.0/29"],"resources":[{"domain":"` + test.pattern + `","ip":["tcp:443"]}]}
+			]`)})
+			if got := Authorize(grants, gateways["tag:home"].Prefixes, test.domain, "tcp", 443); got != test.allowed {
 				t.Fatalf("Authorize(%q, %q) = %v, want %v", test.pattern, test.domain, got, test.allowed)
 			}
 		})
@@ -66,12 +66,11 @@ func TestAuthorizeDomainWildcardsAtTheirDefinedDepths(t *testing.T) {
 }
 
 func TestParseRejectsMalformedDomainWildcards(t *testing.T) {
-	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
 	for _, pattern := range []string{"**", "**.", "***.example.com", "foo.**.example.com", "*.*.example.com"} {
 		t.Run(pattern, func(t *testing.T) {
 			grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
-				{"gateway":"tag:home","resources":[{"domain":"` + pattern + `","ip":["tcp:443"]}]}
-			]`)}, gateways)
+				{"range":["10.254.0.0/29"],"resources":[{"domain":"` + pattern + `","ip":["tcp:443"]}]}
+			]`)})
 			if len(grants) != 0 {
 				t.Fatalf("malformed wildcard %q produced a grant", pattern)
 			}
@@ -80,23 +79,21 @@ func TestParseRejectsMalformedDomainWildcards(t *testing.T) {
 }
 
 func TestMalformedPortFailsClosed(t *testing.T) {
-	g := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
-	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[{"gateway":"tag:home","resources":[{"domain":"a.example.com","ip":["tcp:70000"]}]}]`)}, g)
+	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[{"range":["10.254.0.0/29"],"resources":[{"domain":"a.example.com","ip":["tcp:70000"]}]}]`)})
 	if len(grants) != 0 {
 		t.Fatal("invalid port authorized")
 	}
 }
 
 func TestMalformedCapabilityRangesFailClosed(t *testing.T) {
-	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
 	for _, value := range []string{
 		`[]`, `["10.254.0.1/24"]`, `["2001:db8::/64"]`,
 		`["10.254.0.0/24","10.254.0.128/25"]`,
 	} {
 		t.Run(value, func(t *testing.T) {
 			grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
-				{"gateway":"tag:home","range":` + value + `,"resources":[{"domain":"app.example.com"}]}
-			]`)}, gateways)
+				{"range":` + value + `,"resources":[{"domain":"app.example.com"}]}
+			]`)})
 			if len(grants) != 0 {
 				t.Fatalf("malformed range %s produced a grant", value)
 			}
@@ -104,15 +101,41 @@ func TestMalformedCapabilityRangesFailClosed(t *testing.T) {
 	}
 }
 
+func TestCapabilityRangeIsRequiredAndGatewayIsIgnored(t *testing.T) {
+	missingRange := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
+		{"gateway":"tag:obsolete","resources":[{"domain":"app.example.com"}]}
+	]`)})
+	if len(missingRange) != 0 {
+		t.Fatal("capability without range authorized")
+	}
+	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
+		{"gateway":"tag:obsolete","range":["10.254.0.0/29"],"resources":[{"domain":"app.example.com"}]}
+	]`)})
+	prefixes := []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}
+	if !Authorize(grants, prefixes, "app.example.com", "tcp", 443) {
+		t.Fatal("legacy gateway field changed range-based authorization")
+	}
+}
+
+func TestEgressRejectsCapabilityForAnotherRange(t *testing.T) {
+	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
+		{"range":["10.253.0.0/29"],"resources":[{"domain":"app.example.com"}]}
+	]`)})
+	gateway := Gateway{Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}
+	if _, ok := GatewayFor(grants, gateway, "app.example.com", "tcp", 443); ok {
+		t.Fatal("egress accepted a capability range other than its local assignment")
+	}
+}
+
 func TestResourceIPAuthorizesListedTCPAndUDPPorts(t *testing.T) {
 	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
 	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
-		{"gateway":"tag:home","resources":[{"domain":"app.example.com","ip":["tcp:443","udp:53"]}]}
-	]`)}, gateways)
-	if !Authorize(grants, "tag:home", "app.example.com", "tcp", 443) || !Authorize(grants, "tag:home", "app.example.com", "udp", 53) {
+		{"range":["10.254.0.0/29"],"resources":[{"domain":"app.example.com","ip":["tcp:443","udp:53"]}]}
+	]`)})
+	if !Authorize(grants, gateways["tag:home"].Prefixes, "app.example.com", "tcp", 443) || !Authorize(grants, gateways["tag:home"].Prefixes, "app.example.com", "udp", 53) {
 		t.Fatal("ip entries did not authorize their listed protocol and port")
 	}
-	if Authorize(grants, "tag:home", "app.example.com", "tcp", 53) || Authorize(grants, "tag:home", "app.example.com", "udp", 443) {
+	if Authorize(grants, gateways["tag:home"].Prefixes, "app.example.com", "tcp", 53) || Authorize(grants, gateways["tag:home"].Prefixes, "app.example.com", "udp", 443) {
 		t.Fatal("ip entries authorized an unlisted protocol or port")
 	}
 }
@@ -125,9 +148,9 @@ func TestLegacyResourcePortsFailClosed(t *testing.T) {
 	} {
 		t.Run(resource, func(t *testing.T) {
 			grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
-				{"gateway":"tag:home","resources":[` + resource + `]}
-			]`)}, gateways)
-			if Authorize(grants, "tag:home", "app.example.com", "tcp", 443) {
+				{"range":["10.254.0.0/29"],"resources":[` + resource + `]}
+			]`)})
+			if Authorize(grants, gateways["tag:home"].Prefixes, "app.example.com", "tcp", 443) {
 				t.Fatal("legacy ports field authorized traffic")
 			}
 		})
@@ -137,9 +160,9 @@ func TestLegacyResourcePortsFailClosed(t *testing.T) {
 func TestResourceWithoutIPAuthorizesAllPorts(t *testing.T) {
 	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
 	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
-		{"gateway":"tag:home","resources":[{"domain":"app.example.com"}]}
-	]`)}, gateways)
-	if !Authorize(grants, "tag:home", "app.example.com", "tcp", 443) || !Authorize(grants, "tag:home", "app.example.com", "udp", 53) {
+		{"range":["10.254.0.0/29"],"resources":[{"domain":"app.example.com"}]}
+	]`)})
+	if !Authorize(grants, gateways["tag:home"].Prefixes, "app.example.com", "tcp", 443) || !Authorize(grants, gateways["tag:home"].Prefixes, "app.example.com", "udp", 53) {
 		t.Fatal("resource without ip did not authorize all ports")
 	}
 }
@@ -151,15 +174,15 @@ func TestGatewayForUsesResourceResolverBeforeGrantResolverAndFallback(t *testing
 	}}
 	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
 		{
-			"gateway":"tag:home",
+			"range":["10.254.0.0/29"],
 			"upstreamDNS":"127.0.0.2:53",
 			"resources":[
 				{"domain":"resource.example.com","upstreamDNS":"127.0.0.3:53"},
 				{"domain":"grant.example.com"}
 			]
 		},
-		{"gateway":"tag:home","resources":[{"domain":"fallback.example.com"}]}
-	]`)}, gateways)
+		{"range":["10.254.0.0/29"],"resources":[{"domain":"fallback.example.com"}]}
+	]`)})
 
 	for _, test := range []struct {
 		name, want string
@@ -169,7 +192,7 @@ func TestGatewayForUsesResourceResolverBeforeGrantResolverAndFallback(t *testing
 		{"fallback.example.com", "127.0.0.1:53"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			gateway, ok := GatewayFor(grants, gateways, "tag:home", test.name, "tcp", 443)
+			gateway, ok := GatewayFor(grants, gateways["tag:home"], test.name, "tcp", 443)
 			if !ok || gateway.Resolver != test.want {
 				t.Fatalf("GatewayFor(%q) = %#v, %v; want resolver %q", test.name, gateway, ok, test.want)
 			}
@@ -178,14 +201,13 @@ func TestGatewayForUsesResourceResolverBeforeGrantResolverAndFallback(t *testing
 }
 
 func TestMalformedPolicyResolverFailsClosed(t *testing.T) {
-	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
 	for _, policy := range []string{
-		`{"gateway":"tag:home","upstreamDNS":"system","resources":[{"domain":"app.example.com"}]}`,
-		`{"gateway":"tag:home","upstreamDNS":"resolver.example.com","resources":[{"domain":"app.example.com"}]}`,
-		`{"gateway":"tag:home","resources":[{"domain":"app.example.com","upstreamDNS":"127.0.0.1:0"}]}`,
+		`{"range":["10.254.0.0/29"],"upstreamDNS":"system","resources":[{"domain":"app.example.com"}]}`,
+		`{"range":["10.254.0.0/29"],"upstreamDNS":"resolver.example.com","resources":[{"domain":"app.example.com"}]}`,
+		`{"range":["10.254.0.0/29"],"resources":[{"domain":"app.example.com","upstreamDNS":"127.0.0.1:0"}]}`,
 	} {
 		t.Run(policy, func(t *testing.T) {
-			grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage("[" + policy + "]")}, gateways)
+			grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage("[" + policy + "]")})
 			if len(grants) != 0 {
 				t.Fatalf("invalid resolver policy parsed as %#v", grants)
 			}
@@ -196,21 +218,21 @@ func TestMalformedPolicyResolverFailsClosed(t *testing.T) {
 func TestResourceStringShorthandNormalizesForAuthorization(t *testing.T) {
 	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
 	grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[
-		{"gateway":"tag:home","resources":[
+		{"range":["10.254.0.0/29"],"resources":[
 			{"domain":"object.example.net","ip":["udp:53"]},
 			"example.net:443,80"
 		]}
-	]`)}, gateways)
+	]`)})
 	if len(grants) != 1 {
 		t.Fatalf("parsed grants = %d, want 1", len(grants))
 	}
-	if !Authorize(grants, "tag:home", "example.net", "tcp", 443) || !Authorize(grants, "tag:home", "example.net", "tcp", 80) {
+	if !Authorize(grants, gateways["tag:home"].Prefixes, "example.net", "tcp", 443) || !Authorize(grants, gateways["tag:home"].Prefixes, "example.net", "tcp", 80) {
 		t.Fatal("string shorthand did not authorize its TCP ports")
 	}
-	if Authorize(grants, "tag:home", "example.net", "udp", 443) || Authorize(grants, "tag:home", "example.net", "tcp", 53) {
+	if Authorize(grants, gateways["tag:home"].Prefixes, "example.net", "udp", 443) || Authorize(grants, gateways["tag:home"].Prefixes, "example.net", "tcp", 53) {
 		t.Fatal("string shorthand authorized an unlisted protocol or port")
 	}
-	if !Authorize(grants, "tag:home", "object.example.net", "udp", 53) {
+	if !Authorize(grants, gateways["tag:home"].Prefixes, "object.example.net", "udp", 53) {
 		t.Fatal("object resource semantics changed when mixed with shorthand")
 	}
 }
@@ -223,8 +245,8 @@ func TestResourceStringShorthandFailsClosed(t *testing.T) {
 		"example.net:http", "example.net:0", "example.net:65536",
 	} {
 		t.Run(resource, func(t *testing.T) {
-			grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[{"gateway":"tag:home","resources":["` + resource + `"]}]`)}, gateways)
-			if Authorize(grants, "tag:home", "example.net", "tcp", 443) {
+			grants := Parse(map[string]json.RawMessage{Capability: json.RawMessage(`[{"range":["10.254.0.0/29"],"resources":["` + resource + `"]}]`)})
+			if Authorize(grants, gateways["tag:home"].Prefixes, "example.net", "tcp", 443) {
 				t.Fatalf("malformed shorthand %q authorized traffic", resource)
 			}
 		})
@@ -235,7 +257,7 @@ func TestServiceReauthorizesFlowsAndRestoresAllocations(t *testing.T) {
 	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
 	source := netip.MustParseAddr("100.64.0.2")
 	other := netip.MustParseAddr("100.64.0.3")
-	caps := map[string]json.RawMessage{Capability: json.RawMessage(`[{"gateway":"tag:home","resources":[{"domain":"app.example.com","ip":["tcp:443"]}]}]`)}
+	caps := map[string]json.RawMessage{Capability: json.RawMessage(`[{"range":["10.254.0.0/29"],"resources":[{"domain":"app.example.com","ip":["tcp:443"]}]}]`)}
 	service := &Service{Identity: fakeIdentity{source: caps, other: {}}, Gateways: gateways, Allocations: NewAllocator()}
 	ip, ok := service.DNS(context.Background(), source, "app.example.com")
 	if !ok {
@@ -384,7 +406,7 @@ func TestAllocationStoreRejectsUnsupportedURL(t *testing.T) {
 func TestStatelessGatewayAuthorizesPTRDomain(t *testing.T) {
 	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
 	source := netip.MustParseAddr("100.64.0.2")
-	caps := map[string]json.RawMessage{Capability: json.RawMessage(`[{"gateway":"tag:home","resources":[{"domain":"app.example.com","ip":["tcp:443"]}]}]`)}
+	caps := map[string]json.RawMessage{Capability: json.RawMessage(`[{"range":["10.254.0.0/29"],"resources":[{"domain":"app.example.com","ip":["tcp:443"]}]}]`)}
 	service := &Service{Identity: fakeIdentity{source: caps}, Gateways: gateways}
 	if _, ok := service.FlowDomain(context.Background(), source, netip.MustParseAddr("10.254.0.2"), "app.example.com.", "tcp", 443); !ok {
 		t.Fatal("PTR-reconstructed domain was not authorized")
@@ -401,11 +423,11 @@ func TestFlowDomainReturnsPolicySelectedResolver(t *testing.T) {
 	}}
 	source := netip.MustParseAddr("100.64.0.2")
 	caps := map[string]json.RawMessage{Capability: json.RawMessage(`[
-		{"gateway":"tag:home","upstreamDNS":"127.0.0.2:53","resources":[
+		{"range":["10.254.0.0/29"],"upstreamDNS":"127.0.0.2:53","resources":[
 			{"domain":"resource.example.com","upstreamDNS":"127.0.0.3:53"},
 			{"domain":"grant.example.com"}
 		]},
-		{"gateway":"tag:home","resources":[{"domain":"fallback.example.com"}]}
+		{"range":["10.254.0.0/29"],"resources":[{"domain":"fallback.example.com"}]}
 	]`)}
 	service := &Service{Identity: fakeIdentity{source: caps}, Gateways: gateways}
 	for _, test := range []struct{ name, want string }{
@@ -425,7 +447,7 @@ func TestFlowDomainReturnsPolicySelectedResolver(t *testing.T) {
 func TestGatewaySourceNeverReceivesSyntheticForwardAnswer(t *testing.T) {
 	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}}}
 	source := netip.MustParseAddr("100.64.0.2")
-	caps := map[string]json.RawMessage{Capability: json.RawMessage(`[{"gateway":"tag:home","resources":[{"domain":"app.example.com"}]}]`)}
+	caps := map[string]json.RawMessage{Capability: json.RawMessage(`[{"range":["10.254.0.0/29"],"resources":[{"domain":"app.example.com"}]}]`)}
 	service := &Service{Identity: gatewayIdentity{fakeIdentity: fakeIdentity{source: caps}, tagged: map[netip.Addr]bool{source: true}}, Gateways: gateways, Allocations: NewAllocator()}
 	if _, ok := service.DNS(context.Background(), source, "app.example.com"); ok {
 		t.Fatal("gateway source received synthetic DNS")

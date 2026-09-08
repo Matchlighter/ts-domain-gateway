@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -60,20 +61,20 @@ func TestSampleDomainGrantUsesIPPortPolicy(t *testing.T) {
 	if err := json.Unmarshal(standard, &policy); err != nil {
 		t.Fatal(err)
 	}
-	gateways := map[string]domain.Gateway{"tag:gateway1": {}}
+	gateways := map[string]domain.Gateway{"tag:gateway1": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/18")}}}
 	for _, grant := range policy.Grants {
 		raw, ok := grant.App[domain.Capability]
 		if !ok {
 			continue
 		}
-		parsed := domain.Parse(map[string]json.RawMessage{domain.Capability: raw}, gateways)
-		if !domain.Authorize(parsed, "tag:gateway1", "example.org", "udp", 5000) {
+		parsed := domain.Parse(map[string]json.RawMessage{domain.Capability: raw})
+		if !domain.Authorize(parsed, gateways["tag:gateway1"].Prefixes, "example.org", "udp", 5000) {
 			t.Fatal("sample ip entry did not authorize its UDP port")
 		}
-		if domain.Authorize(parsed, "tag:gateway1", "example.org", "tcp", 5000) {
+		if domain.Authorize(parsed, gateways["tag:gateway1"].Prefixes, "example.org", "tcp", 5000) {
 			t.Fatal("sample ip entry authorized an unlisted protocol")
 		}
-		gateway, ok := domain.GatewayFor(parsed, gateways, "tag:gateway1", "example.org", "udp", 5000)
+		gateway, ok := domain.GatewayFor(parsed, gateways["tag:gateway1"], "example.org", "udp", 5000)
 		if !ok || gateway.Resolver != "192.0.2.54:53" {
 			t.Fatalf("sample resource resolver = %#v, %v", gateway, ok)
 		}

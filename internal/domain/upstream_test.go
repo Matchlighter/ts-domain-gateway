@@ -47,32 +47,24 @@ func TestNodeAttrsRejectInvalidDuplicateAndOverlappingRanges(t *testing.T) {
 	}
 }
 
-func TestDNSReturnsUnavailableForNewProtectedNameWithoutTopologyButKeepsLease(t *testing.T) {
+func TestDNSAllocatesFromCapabilityRangeWithoutTopology(t *testing.T) {
 	source := netip.MustParseAddr("100.64.0.2")
-	caps := map[string]json.RawMessage{Capability: json.RawMessage(`[{"gateway":"tag:home","resources":[{"domain":"app.example.com"}]}]`)}
+	caps := map[string]json.RawMessage{Capability: json.RawMessage(`[{"range":["10.254.0.0/29"],"resources":[{"domain":"app.example.com"}]}]`)}
 	allocator := NewAllocator()
 	service := &Service{
 		Identity:    fakeIdentity{source: caps},
 		Gateways:    map[string]Gateway{},
 		Allocations: allocator,
-		GatewayTopology: func(context.Context) (map[string]Gateway, error) {
-			return map[string]Gateway{}, nil
-		},
 	}
-	if _, outcome := service.DNSAnswer(context.Background(), source, "app.example.com"); outcome != DNSUnavailable {
-		t.Fatalf("new protected name outcome = %v, want unavailable", outcome)
-	}
-	if want, err := allocator.Allocate("tag:home", []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")}, "app.example.com"); err != nil {
-		t.Fatal(err)
-	} else if got, outcome := service.DNSAnswer(context.Background(), source, "app.example.com"); outcome != DNSSynthesized || got != want {
-		t.Fatalf("leased name = %s/%v, want %s/synthesized", got, outcome, want)
+	if got, outcome := service.DNSAnswer(context.Background(), source, "app.example.com"); outcome != DNSSynthesized || !netip.MustParsePrefix("10.254.0.0/29").Contains(got) {
+		t.Fatalf("new protected name = %s/%v, want allocation from capability range", got, outcome)
 	}
 }
 
 func TestServiceAllocatesAndAuthorizesAcrossGatewayRanges(t *testing.T) {
 	gateways := map[string]Gateway{"tag:home": {Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/30"), netip.MustParsePrefix("10.254.1.0/30")}}}
 	source := netip.MustParseAddr("100.64.0.2")
-	caps := map[string]json.RawMessage{Capability: json.RawMessage(`[{"gateway":"tag:home","resources":[{"domain":"one.example.com"},{"domain":"two.example.com"},{"domain":"three.example.com"},{"domain":"four.example.com"}]}]`)}
+	caps := map[string]json.RawMessage{Capability: json.RawMessage(`[{"range":["10.254.0.0/30","10.254.1.0/30"],"resources":[{"domain":"one.example.com"},{"domain":"two.example.com"},{"domain":"three.example.com"},{"domain":"four.example.com"}]}]`)}
 	service := &Service{Identity: fakeIdentity{source: caps}, Gateways: gateways, Allocations: NewAllocator()}
 	for _, name := range []string{"one.example.com", "two.example.com", "three.example.com", "four.example.com"} {
 		ip, ok := service.DNS(context.Background(), source, name)
@@ -93,19 +85,15 @@ func TestServiceAllocatesAndAuthorizesAcrossGatewayRanges(t *testing.T) {
 	}
 }
 
-func TestCapabilityRangeOverridesDNSGatewayTopology(t *testing.T) {
+func TestCapabilityRangeAllocatesWithoutGatewayTopology(t *testing.T) {
 	source := netip.MustParseAddr("100.64.0.2")
 	override := netip.MustParsePrefix("10.253.0.0/29")
 	service := &Service{
 		Identity: fakeIdentity{source: {Capability: json.RawMessage(`[
-			{"gateway":"tag:home","range":["10.253.0.0/29"],"resources":[{"domain":"app.example.com"}]}
+				{"range":["10.253.0.0/29"],"resources":[{"domain":"app.example.com"}]}
 		]`)}},
 		Gateways:    map[string]Gateway{},
 		Allocations: NewAllocator(),
-		GatewayTopology: func(context.Context) (map[string]Gateway, error) {
-			t.Fatal("capability range should not consult route discovery")
-			return nil, nil
-		},
 	}
 	ip, outcome := service.DNSAnswer(context.Background(), source, "app.example.com")
 	if outcome != DNSSynthesized || !override.Contains(ip) {
@@ -117,8 +105,8 @@ func TestConflictingCapabilityRangesFailClosed(t *testing.T) {
 	source := netip.MustParseAddr("100.64.0.2")
 	service := &Service{
 		Identity: fakeIdentity{source: {Capability: json.RawMessage(`[
-			{"gateway":"tag:home","range":["10.253.0.0/29"],"resources":[{"domain":"app.example.com"}]},
-			{"gateway":"tag:home","range":["10.252.0.0/29"],"resources":[{"domain":"app.example.com"}]}
+				{"range":["10.253.0.0/29"],"resources":[{"domain":"app.example.com"}]},
+				{"range":["10.252.0.0/29"],"resources":[{"domain":"app.example.com"}]}
 		]`)}},
 		Allocations: NewAllocator(),
 	}

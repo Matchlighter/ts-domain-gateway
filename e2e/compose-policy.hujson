@@ -7,7 +7,7 @@
   },
   "grants": [
     {"src": ["*"], "dst": ["tag:dns"], "ip": ["udp:53"]},
-    {"src": ["tag:client"], "dst": ["tag:dns", "tag:gateway1"], "app": {"matchlighter.net/cap/domain-gateway": [{"gateway": "tag:gateway1", "resources": [{"domain": "protected.example.test", "ip": ["tcp:80", "tcp:443", "udp:9000"]}]}]}},
+    {"src": ["tag:client"], "dst": ["tag:dns", "tag:gateway1"], "app": {"matchlighter.net/cap/domain-gateway": [{"range": ["10.254.0.0/18"], "resources": [{"domain": "protected.example.test", "ip": ["tcp:80", "tcp:443", "udp:9000"]}]}]}},
     {"src": ["tag:client"], "dst": ["10.254.0.0/18"], "ip": ["tcp:80", "tcp:443", "udp:9000"], "via": ["tag:gateway1"]}
   ],
   "autoApprovers": {"routes": {"10.254.0.0/18": ["tag:gateway1"]}},

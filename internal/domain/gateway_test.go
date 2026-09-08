@@ -72,7 +72,7 @@ func TestProxyTCPResolvesThroughResourcePolicyResolver(t *testing.T) {
 	source := netip.MustParseAddr("100.64.0.2")
 	service := &Service{
 		Identity: fakeIdentity{source: map[string]json.RawMessage{Capability: json.RawMessage(`[
-			{"gateway":"tag:home","resources":[{"domain":"app.example.com","upstreamDNS":"` + resolver.LocalAddr().String() + `"}]}
+			{"range":["10.254.0.0/29"],"resources":[{"domain":"app.example.com","upstreamDNS":"` + resolver.LocalAddr().String() + `"}]}
 		]`)}},
 		Gateways: map[string]Gateway{"tag:home": {
 			Prefixes: []netip.Prefix{netip.MustParsePrefix("10.254.0.0/29")},

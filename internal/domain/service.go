@@ -202,9 +202,6 @@ type Service struct {
 	Denied       atomic.Uint64
 	Lease        time.Duration
 	Now          func() time.Time
-	// GatewayTopology is DNS's active route-discovery seam. It is consulted
-	// only for a new protected mapping; an existing lease remains answerable.
-	GatewayTopology func(context.Context) (map[string]Gateway, error)
 }
 
 type DNSOutcome uint8
@@ -252,19 +249,13 @@ func (s *Service) DNSAnswer(ctx context.Context, source netip.Addr, name string)
 		s.Passthrough.Add(1)
 		return netip.Addr{}, DNSPassthrough
 	}
-	// Discovery is deliberately after authorization. A gateway name is policy
-	// input, while its active routes are operational state. Static callers keep
-	// the historic unknown-gateway rejection at the parsing seam.
-	grantGateways := s.Gateways
-	if s.GatewayTopology != nil {
-		grantGateways = nil
-	}
-	grants := Parse(caps, grantGateways)
-	gateway, rangeOverride, authorized := GatewayForName(grants, name)
+	grants := Parse(caps)
+	ranges, authorized := RangesForName(grants, name)
 	if !authorized {
 		s.Passthrough.Add(1)
 		return netip.Addr{}, DNSPassthrough
 	}
+	gateway := rangeKey(ranges)
 	if s.AllocationStore != nil {
 		if ip, found, err := s.AllocationStore.LookupKey(ctx, s.Allocations, gateway, name, s.now(), s.lease()); err != nil {
 			s.Passthrough.Add(1)
@@ -277,29 +268,11 @@ func (s *Service) DNSAnswer(ctx context.Context, source netip.Addr, name string)
 		s.Synthesized.Add(1)
 		return ip, DNSSynthesized
 	}
-	gateways := s.Gateways
-	if len(rangeOverride) == 0 && s.GatewayTopology != nil {
-		var err error
-		gateways, err = s.GatewayTopology(ctx)
-		if err != nil {
-			s.Passthrough.Add(1)
-			return netip.Addr{}, DNSUnavailable
-		}
-	}
-	gatewayConfig, found := gateways[gateway]
-	if len(rangeOverride) != 0 {
-		gatewayConfig.Prefixes = rangeOverride
-		found = true
-	}
-	if !found || len(gatewayConfig.Prefixes) == 0 {
-		s.Passthrough.Add(1)
-		return netip.Addr{}, DNSUnavailable
-	}
 	var ip netip.Addr
 	if s.AllocationStore != nil {
-		ip, err = s.AllocationStore.Allocate(ctx, s.Allocations, gateway, gatewayConfig.Prefixes, name, s.now(), s.lease())
+		ip, err = s.AllocationStore.Allocate(ctx, s.Allocations, gateway, ranges, name, s.now(), s.lease())
 	} else {
-		ip, err = s.Allocations.Allocate(gateway, gatewayConfig.Prefixes, name)
+		ip, err = s.Allocations.Allocate(gateway, ranges, name)
 	}
 	if err != nil {
 		s.Passthrough.Add(1)
@@ -334,7 +307,10 @@ func (s *Service) Flow(ctx context.Context, source, destination netip.Addr, prot
 		s.Denied.Add(1)
 		return Mapping{}, Gateway{}, false
 	}
-	gateway, ok := GatewayFor(Parse(caps, s.Gateways), s.Gateways, m.Gateway, m.Domain, proto, port)
+	gateway, ok := s.gatewayForDestination(destination)
+	if ok {
+		gateway, ok = GatewayFor(Parse(caps), gateway, m.Domain, proto, port)
+	}
 	if !ok {
 		s.Denied.Add(1)
 		return Mapping{}, Gateway{}, false
@@ -351,17 +327,8 @@ func (s *Service) FlowDomain(ctx context.Context, source, destination netip.Addr
 		s.Denied.Add(1)
 		return Gateway{}, false
 	}
-	var tag string
-	for candidate, gateway := range s.Gateways {
-		if containsPrefix(gateway.Prefixes, destination) {
-			if tag != "" {
-				s.Denied.Add(1)
-				return Gateway{}, false
-			}
-			tag = candidate
-		}
-	}
-	if tag == "" {
+	gateway, ok := s.gatewayForDestination(destination)
+	if !ok {
 		s.Denied.Add(1)
 		return Gateway{}, false
 	}
@@ -370,13 +337,27 @@ func (s *Service) FlowDomain(ctx context.Context, source, destination netip.Addr
 		s.Denied.Add(1)
 		return Gateway{}, false
 	}
-	gateway, ok := GatewayFor(Parse(caps, s.Gateways), s.Gateways, tag, name, proto, port)
+	gateway, ok = GatewayFor(Parse(caps), gateway, name, proto, port)
 	if !ok {
 		s.Denied.Add(1)
 		return Gateway{}, false
 	}
 	s.Allowed.Add(1)
 	return gateway, true
+}
+
+func (s *Service) gatewayForDestination(destination netip.Addr) (Gateway, bool) {
+	var selected Gateway
+	for _, gateway := range s.Gateways {
+		if !containsPrefix(gateway.Prefixes, destination) {
+			continue
+		}
+		if selected.Prefixes != nil {
+			return Gateway{}, false
+		}
+		selected = gateway
+	}
+	return selected, selected.Prefixes != nil
 }
 
 func containsPrefix(prefixes []netip.Prefix, address netip.Addr) bool {
